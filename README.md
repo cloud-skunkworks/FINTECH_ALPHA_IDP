@@ -1,4 +1,4 @@
-# IDP Platform — FinTech Infrastructure Vending Machine
+# IDP Platform — FinTech Infrastructure Vending Machine - Prototype Generic
 
 > **Classification:** Internal Engineering — Confidential  
 > **Version:** 1.0  
