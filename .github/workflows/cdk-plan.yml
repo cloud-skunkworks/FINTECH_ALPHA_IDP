@@ -1,0 +1,256 @@
+name: CDK Plan
+
+on:
+  pull_request:
+    paths:
+      - 'cdk/**'
+      - 'policy/**'
+      - '.github/workflows/cdk-plan.yml'
+
+permissions:
+  id-token: write       # Required: OIDC token issuance
+  contents: read
+  pull-requests: write  # Required: post plan comment to PR
+
+concurrency:
+  group: cdk-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ca-central-1
+  NODE_VERSION: '20'
+  CDK_VERSION: '2.140.0'
+
+jobs:
+  # ── Lint & Type Check ───────────────────────────────────────────────────
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Install CDK dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: TypeScript compile check
+        working-directory: cdk
+        run: npm run build
+
+      - name: ESLint
+        working-directory: cdk
+        run: npm run lint || true  # Warn only — enforced in pre-commit
+
+  # ── CDK Synth ─────────────────────────────────────────────────────────────
+  synth:
+    name: CDK Synth
+    runs-on: ubuntu-22.04
+    needs: lint
+    outputs:
+      has_changes: ${{ steps.diff.outputs.has_changes }}
+    strategy:
+      matrix:
+        environment: [dev, uat, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Configure AWS credentials (OIDC — no static keys)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-actions-idp-plan
+          role-session-name: CdkPlan-${{ matrix.environment }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: CDK Synth — ${{ matrix.environment }}
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_${{ matrix.environment }}: ${{ vars[format('AWS_ACCOUNT_{0}', matrix.environment)] }}
+        run: |
+          cdk synth -c env=${{ matrix.environment }} --output cdk.out-${{ matrix.environment }}
+
+      - name: CDK Diff — ${{ matrix.environment }}
+        id: diff
+        working-directory: cdk
+        run: |
+          DIFF_OUTPUT=$(cdk diff -c env=${{ matrix.environment }} 2>&1 || true)
+          echo "$DIFF_OUTPUT"
+          # Check if there are actual infrastructure changes
+          if echo "$DIFF_OUTPUT" | grep -q "There were no differences"; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          fi
+          # Save diff for PR comment
+          echo "$DIFF_OUTPUT" > /tmp/cdk-diff-${{ matrix.environment }}.txt
+
+      - name: Upload synth output
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-synth-${{ matrix.environment }}
+          path: cdk/cdk.out-${{ matrix.environment }}/
+          retention-days: 7
+
+      - name: Upload diff output
+        uses: actions/upload-artifact@v4
+        with:
+          name: cdk-diff-${{ matrix.environment }}
+          path: /tmp/cdk-diff-${{ matrix.environment }}.txt
+          retention-days: 7
+
+  # ── OPA Policy Check ──────────────────────────────────────────────────────
+  policy-check:
+    name: OPA Policy Check
+    runs-on: ubuntu-22.04
+    needs: synth
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download synth output (dev)
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-synth-dev
+          path: cdk/cdk.out-dev/
+
+      - name: Install OPA
+        run: |
+          curl -L -o /usr/local/bin/opa \
+            https://github.com/open-policy-agent/opa/releases/download/v0.65.0/opa_linux_amd64
+          chmod +x /usr/local/bin/opa
+
+      - name: Install conftest
+        run: |
+          curl -L -o /tmp/conftest.tar.gz \
+            https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz
+          tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin/ conftest
+
+      - name: Run OPA Rego tests
+        run: opa test policy/rego/ policy/tests/ -v
+
+      - name: Run conftest against CDK synth output
+        run: |
+          conftest test cdk/cdk.out-dev/ \
+            --policy policy/rego/ \
+            --output github \
+            --no-fail || true  # Report findings but don't block on initial run
+
+  # ── Security Scan (checkov) ───────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-22.04
+    needs: synth
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download synth output
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-synth-dev
+          path: cdk/cdk.out-dev/
+
+      - name: Run Checkov (CloudFormation)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: cdk/cdk.out-dev/
+          framework: cloudformation
+          soft_fail: false
+          output_format: github_failed_only
+          skip_check: CKV_AWS_111,CKV_AWS_115  # Skip checks covered by SCPs
+
+  # ── Cost Estimate ──────────────────────────────────────────────────────────
+  cost-estimate:
+    name: Cost Estimate
+    runs-on: ubuntu-22.04
+    needs: synth
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Download synth output
+        uses: actions/download-artifact@v4
+        with:
+          name: cdk-synth-dev
+          path: cdk/cdk.out-dev/
+
+      - name: Run Infracost
+        run: |
+          infracost breakdown \
+            --path cdk/cdk.out-dev/ \
+            --format json \
+            --out-file /tmp/infracost.json
+
+      - name: Post Infracost comment
+        uses: infracost/actions/comment@v1
+        with:
+          path: /tmp/infracost.json
+          behavior: update
+
+  # ── Post Summary Comment ──────────────────────────────────────────────────
+  post-comment:
+    name: Post Plan Summary
+    runs-on: ubuntu-22.04
+    needs: [synth, policy-check, security-scan]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download diffs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cdk-diff-*
+          merge-multiple: true
+          path: /tmp/diffs/
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const envs = ['dev', 'uat', 'prod'];
+            let body = '## CDK Plan Summary\n\n';
+
+            for (const env of envs) {
+              const diffFile = `/tmp/diffs/cdk-diff-${env}.txt`;
+              if (fs.existsSync(diffFile)) {
+                const diff = fs.readFileSync(diffFile, 'utf8');
+                const hasChanges = !diff.includes('There were no differences');
+                const icon = hasChanges ? '⚠️' : '✅';
+                body += `### ${icon} ${env.toUpperCase()}\n\n`;
+                body += '<details><summary>Show diff</summary>\n\n```\n';
+                body += diff.slice(0, 4000); // Truncate for comment limits
+                body += '\n```\n</details>\n\n';
+              }
+            }
+
+            body += `---\n*Workflow run: [#${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body,
+            });

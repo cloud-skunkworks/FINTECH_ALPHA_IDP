@@ -1,0 +1,47 @@
+---
+# Platform namespace — hosts IDP system workloads
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idp-platform
+  labels:
+    app.kubernetes.io/managed-by: aws-cdk
+    app.kubernetes.io/part-of: idp-platform
+    # Pod Security Admission — enforce restricted profile
+    # Prevents: root containers, privileged mode, host namespaces
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+  annotations:
+    idp.internal/owner-team: platform-engineering
+    idp.internal/cost-centre: CC-0001
+    idp.internal/provisioned-by: aws-cdk
+
+---
+# Monitoring namespace — OTel Collector, Prometheus
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/managed-by: aws-cdk
+    pod-security.kubernetes.io/enforce: privileged  # OTel DaemonSet needs elevated access
+    pod-security.kubernetes.io/warn: baseline
+  annotations:
+    idp.internal/owner-team: platform-engineering
+    idp.internal/cost-centre: CC-0001
+
+---
+# Gatekeeper system namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gatekeeper-system
+  labels:
+    app.kubernetes.io/managed-by: aws-cdk
+    pod-security.kubernetes.io/enforce: privileged  # Gatekeeper requires elevated access
+    control-plane: controller-manager
+    admission.gatekeeper.sh/ignore: "no-self-managing"

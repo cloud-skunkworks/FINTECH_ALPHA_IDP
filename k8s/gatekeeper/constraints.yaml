@@ -1,0 +1,112 @@
+---
+# OPA Gatekeeper Constraints
+# These are instantiated from ConstraintTemplates defined in constraint-templates.yaml
+#
+# Enforcement: "deny" in production, "warn" in dev/uat
+# All violations are logged to CloudWatch and visible in `kubectl describe` output
+
+# ── Deny Privileged Containers ─────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDenyPrivilegedContainers
+metadata:
+  name: deny-privileged-containers
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+      - monitoring  # OTel DaemonSet needs elevated access
+
+---
+# ── Require IRSA Annotation on ServiceAccounts ────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireIrsa
+metadata:
+  name: require-irsa-annotation
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["ServiceAccount"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - gatekeeper-system
+      - monitoring
+
+---
+# ── Deny Containers Running as Root ───────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDenyRootContainers
+metadata:
+  name: deny-root-containers
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+
+---
+# ── Require Resource Limits ───────────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireResourceLimits
+metadata:
+  name: require-resource-limits
+spec:
+  enforcementAction: warn  # Warn only — enforce after 30-day migration window
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+      - monitoring
+
+---
+# ── Require Mandatory Labels on Namespaces ────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequireNamespaceLabels
+metadata:
+  name: require-namespace-labels
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Namespace"]
+    excludedNamespaces:
+      - kube-system
+      - kube-public
+      - kube-node-lease
+      - gatekeeper-system
+  parameters:
+    requiredLabels:
+      - "app.kubernetes.io/managed-by"
+      - "environment"
+
+---
+# ── Deny Host Namespace Sharing ───────────────────────────────────────────
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDenyHostNamespace
+metadata:
+  name: deny-host-namespace
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system

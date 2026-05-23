@@ -1,0 +1,120 @@
+name: Policy Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: write
+
+env:
+  OPA_VERSION: '0.65.0'
+
+jobs:
+  opa-tests:
+    name: OPA Rego Tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install OPA
+        run: |
+          curl -L -o /usr/local/bin/opa \
+            https://github.com/open-policy-agent/opa/releases/download/v${{ env.OPA_VERSION }}/opa_linux_amd64
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - name: Run OPA unit tests
+        run: |
+          opa test policy/rego/ policy/tests/ -v --format pretty
+
+      - name: OPA coverage check
+        run: |
+          opa test policy/rego/ policy/tests/ \
+            --coverage \
+            --format json | tee /tmp/coverage.json
+          # Require ≥ 80% coverage
+          COVERAGE=$(cat /tmp/coverage.json | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          files = data.get('files', {})
+          covered = sum(f.get('covered_lines', 0) for f in files.values())
+          total = sum(f.get('total_lines', 0) for f in files.values())
+          pct = (covered / total * 100) if total > 0 else 0
+          print(f'{pct:.1f}')
+          ")
+          echo "OPA policy coverage: $COVERAGE%"
+          python3 -c "assert float('$COVERAGE') >= 80, f'Coverage {$COVERAGE}% is below 80% threshold'"
+
+  checkov:
+    name: Checkov Security Scan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov (K8s manifests)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: k8s/
+          framework: kubernetes
+          soft_fail: false
+          output_format: sarif
+          output_file_path: checkov-k8s.sarif
+
+      - name: Upload Checkov SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-k8s.sarif
+          category: checkov-k8s
+
+  python-security:
+    name: Python Security Scan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bandit + safety
+        run: pip install bandit[toml] safety
+
+      - name: Bandit SAST
+        working-directory: platform
+        run: |
+          bandit -r api/ agents/ \
+            -f sarif \
+            -o /tmp/bandit.sarif \
+            -ll  # Only MEDIUM and HIGH
+        continue-on-error: true
+
+      - name: Safety dependency check
+        working-directory: platform/api
+        run: |
+          safety check -r requirements.txt --full-report
+        continue-on-error: true
+
+      - name: Upload Bandit SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: /tmp/bandit.sarif
+          category: bandit
+
+  secret-scan:
+    name: Secret Scan
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+
+      - name: Scan for secrets (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

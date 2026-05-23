@@ -1,0 +1,87 @@
+app:
+  title: IDP Developer Portal
+  baseUrl: http://localhost:3000
+
+organization:
+  name: FinTech Platform
+
+backend:
+  baseUrl: http://localhost:7007
+  listen:
+    port: 7007
+  csp:
+    connect-src: ["'self'", 'http:', 'https:']
+  cors:
+    origin: http://localhost:3000
+    methods: [GET, HEAD, PATCH, POST, PUT]
+    credentials: true
+  database:
+    client: pg
+    connection:
+      host: ${POSTGRES_HOST}
+      port: 5432
+      user: ${POSTGRES_USER}
+      password: ${POSTGRES_PASSWORD}
+      database: backstage
+      ssl:
+        require: true
+
+integrations:
+  github:
+    - host: github.com
+      token: ${GITHUB_TOKEN}
+
+auth:
+  # AWS Cognito SSO — developers authenticate with their Identity Center credentials
+  environment: development
+  providers:
+    github:
+      development:
+        clientId: ${AUTH_GITHUB_CLIENT_ID}
+        clientSecret: ${AUTH_GITHUB_CLIENT_SECRET}
+
+scaffolder:
+  defaultCommitMessage: "feat(idp): provision {{ parameters.service_name }}-{{ parameters.environment }}"
+
+catalog:
+  import:
+    entityFilename: catalog-info.yaml
+    pullRequestBranchName: backstage-integration
+  rules:
+    - allow: [Component, System, API, Location, Template, Resource, User, Group]
+  locations:
+    # Platform templates
+    - type: file
+      target: ./catalog/templates/eks-microservice/template.yaml
+      rules:
+        - allow: [Template]
+    - type: file
+      target: ./catalog/templates/ecs-fargate-service/template.yaml
+      rules:
+        - allow: [Template]
+    - type: file
+      target: ./catalog/templates/s3-data-bucket/template.yaml
+      rules:
+        - allow: [Template]
+    # Registered components
+    - type: url
+      target: https://github.com/your-org/idp-platform/blob/main/platform/backstage/catalog/components/platform-api.yaml
+
+techdocs:
+  builder: local
+  generator:
+    runIn: docker
+  publisher:
+    type: local
+
+kubernetes:
+  serviceLocatorMethod:
+    type: multiTenant
+  clusterLocatorMethods:
+    - type: config
+      clusters:
+        - url: ${EKS_CLUSTER_ENDPOINT}
+          name: idp-eks-prod
+          authProvider: aws
+          awsRegion: ca-central-1
+          caData: ${EKS_CA_DATA}

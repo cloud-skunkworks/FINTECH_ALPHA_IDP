@@ -1,0 +1,119 @@
+name: Drift Detection
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Daily at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to check'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, dev, uat, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: ca-central-1
+  NODE_VERSION: '20'
+  CDK_VERSION: '2.140.0'
+
+jobs:
+  detect-drift:
+    name: Detect Drift — ${{ matrix.environment }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - dev
+          - uat
+          - prod
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars[format('AWS_ACCOUNT_{0}', matrix.environment)] }}:role/github-actions-idp-readonly
+          role-session-name: DriftDetect-${{ matrix.environment }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: CDK Diff (drift check)
+        id: drift
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_DEV: ${{ vars.AWS_ACCOUNT_DEV }}
+          CDK_ACCOUNT_UAT: ${{ vars.AWS_ACCOUNT_UAT }}
+          CDK_ACCOUNT_PROD: ${{ vars.AWS_ACCOUNT_PROD }}
+        run: |
+          DIFF_OUTPUT=$(cdk diff "*-${{ matrix.environment }}" -c env=${{ matrix.environment }} 2>&1 || true)
+          echo "$DIFF_OUTPUT"
+
+          if echo "$DIFF_OUTPUT" | grep -qE "^[│├└].*\["; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "$DIFF_OUTPUT" > /tmp/drift-${{ matrix.environment }}.txt
+          else
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Alert on drift
+        if: steps.drift.outputs.drift_detected == 'true'
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "⚠️ *Infrastructure Drift Detected* — ${{ matrix.environment }}",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "⚠️ *Infrastructure Drift Detected*\n*Environment:* ${{ matrix.environment }}\n*Time:* <!date^${{ github.event.repository.updated_at }}^{date_short_pretty} at {time}|now>\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Details>"
+                  }
+                }
+              ]
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PLATFORM_WEBHOOK }}
+
+      - name: Upload drift report
+        if: steps.drift.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report-${{ matrix.environment }}
+          path: /tmp/drift-${{ matrix.environment }}.txt
+          retention-days: 30
+
+      - name: Create GitHub Issue on drift (prod only)
+        if: steps.drift.outputs.drift_detected == 'true' && matrix.environment == 'prod'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const drift = fs.readFileSync('/tmp/drift-prod.txt', 'utf8');
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[DRIFT] Production infrastructure drift detected — ${new Date().toISOString().split('T')[0]}`,
+              body: `## Infrastructure Drift Detected\n\n**Environment:** prod\n**Detected at:** ${new Date().toISOString()}\n\n\`\`\`\n${drift.slice(0, 6000)}\n\`\`\`\n\nThis issue was automatically created by the drift detection workflow.\nPlease investigate and either reconcile the state or update the CDK code to match.`,
+              labels: ['drift', 'production', 'platform'],
+              assignees: [],
+            });

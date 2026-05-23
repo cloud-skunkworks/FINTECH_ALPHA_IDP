@@ -1,0 +1,203 @@
+# OpenTelemetry Collector Configuration
+#
+# Deployed as a DaemonSet on EKS via Helm.
+# Receives traces (OTLP), metrics (Prometheus scrape), and logs.
+# Exports to:
+#   - Amazon Managed Prometheus (AMP) for metrics
+#   - AWS X-Ray for traces
+#   - CloudWatch Logs for logs
+#
+# Auth: IRSA role assumed via ServiceAccount annotation.
+# Env vars injected by Helm values (see values.yaml).
+
+receivers:
+  # ── OTLP Receiver (traces + metrics from instrumented services) ──────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # ── Prometheus Receiver (scrape kube-state-metrics, node-exporter) ───────
+  prometheus:
+    config:
+      global:
+        scrape_interval: 30s
+        scrape_timeout: 10s
+      scrape_configs:
+        - job_name: "kubernetes-pods"
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+              action: keep
+              regex: "true"
+            - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+              action: replace
+              target_label: __metrics_path__
+              regex: (.+)
+            - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+              action: replace
+              regex: ([^:]+)(?::\d+)?;(\d+)
+              replacement: $1:$2
+              target_label: __address__
+            - action: labelmap
+              regex: __meta_kubernetes_pod_label_(.+)
+            - source_labels: [__meta_kubernetes_namespace]
+              action: replace
+              target_label: kubernetes_namespace
+            - source_labels: [__meta_kubernetes_pod_name]
+              action: replace
+              target_label: kubernetes_pod_name
+
+        - job_name: "kube-state-metrics"
+          static_configs:
+            - targets: ["kube-state-metrics.monitoring.svc.cluster.local:8080"]
+
+  # ── Kubernetes Events (for Gatekeeper violations, pod restarts) ──────────
+  k8s_events:
+    namespaces: []  # All namespaces
+
+  # ── Host Metrics (from DaemonSet) ────────────────────────────────────────
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu: {}
+      memory: {}
+      disk: {}
+      network: {}
+      load: {}
+
+processors:
+  # ── Batch (reduce API calls) ──────────────────────────────────────────────
+  batch:
+    timeout: 10s
+    send_batch_size: 1024
+
+  # ── Memory Limiter (prevent OOM) ─────────────────────────────────────────
+  memory_limiter:
+    limit_mib: 512
+    spike_limit_mib: 128
+    check_interval: 5s
+
+  # ── Resource Detection (add k8s metadata to all telemetry) ───────────────
+  resourcedetection:
+    detectors: [eks, ec2, env]
+    timeout: 5s
+
+  # ── K8s Attributes (enrich with pod/namespace metadata) ──────────────────
+  k8sattributes:
+    auth_type: serviceAccount
+    passthrough: false
+    filter:
+      node_from_env_var: KUBE_NODE_NAME
+    extract:
+      metadata:
+        - k8s.pod.name
+        - k8s.pod.uid
+        - k8s.deployment.name
+        - k8s.namespace.name
+        - k8s.node.name
+        - k8s.pod.start_time
+      labels:
+        - tag_name: app
+          key: app.kubernetes.io/name
+          from: pod
+        - tag_name: version
+          key: app.kubernetes.io/version
+          from: pod
+        - tag_name: owner_team
+          key: owner-team
+          from: namespace
+        - tag_name: cost_centre
+          key: cost-centre
+          from: namespace
+        - tag_name: environment
+          key: environment
+          from: namespace
+
+  # ── PII Filter (PCI-DSS requirement) ─────────────────────────────────────
+  # Masks card-like patterns in log bodies and span attributes.
+  # Note: this is a best-effort filter — sanitise at the source.
+  transform:
+    log_statements:
+      - context: log
+        statements:
+          # Mask 16-digit card-like numbers (PAN)
+          - replace_pattern(body, "\\b(\\d{4})[\\s-]?(\\d{4})[\\s-]?(\\d{4})[\\s-]?(\\d{4})\\b", "****-****-****-$4")
+
+  # ── Filter (drop debug spans in prod) ────────────────────────────────────
+  filter:
+    traces:
+      span:
+        - 'attributes["http.route"] == "/healthz"'   # Drop liveness probe traces
+        - 'attributes["http.route"] == "/readyz"'
+    error_mode: ignore
+
+exporters:
+  # ── Amazon Managed Prometheus (AMP) — metrics ─────────────────────────────
+  prometheusremotewrite:
+    endpoint: "${env:AMP_REMOTE_WRITE_ENDPOINT}"
+    auth:
+      authenticator: sigv4auth
+    tls:
+      insecure: false
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+  # ── AWS X-Ray — traces ────────────────────────────────────────────────────
+  awsxray:
+    region: "${env:AWS_REGION}"
+    no_verify_ssl: false
+    local_mode: false
+
+  # ── CloudWatch Logs — logs ────────────────────────────────────────────────
+  awscloudwatchlogs:
+    region: "${env:AWS_REGION}"
+    log_group_name: "/idp/${env:ENVIRONMENT}/otel-collector"
+    log_stream_name: "${env:KUBE_NODE_NAME}"
+    raw_log: false
+
+  # ── Debug (disabled in prod — enable for troubleshooting) ─────────────────
+  debug:
+    verbosity: normal
+
+extensions:
+  # SigV4 auth — used by AMP exporter — credentials from IRSA task role
+  sigv4auth:
+    region: "${env:AWS_REGION}"
+    service: aps
+
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+  pprof:
+    endpoint: 0.0.0.0:1888
+
+service:
+  extensions: [sigv4auth, health_check, pprof]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resourcedetection, k8sattributes, filter, batch]
+      exporters: [awsxray]
+
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, resourcedetection, k8sattributes, batch]
+      exporters: [prometheusremotewrite]
+
+    logs:
+      receivers: [otlp, k8s_events]
+      processors: [memory_limiter, resourcedetection, k8sattributes, transform, batch]
+      exporters: [awscloudwatchlogs]
+
+  telemetry:
+    logs:
+      level: "info"
+    metrics:
+      address: 0.0.0.0:8888

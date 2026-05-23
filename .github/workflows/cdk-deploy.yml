@@ -1,0 +1,209 @@
+name: CDK Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cdk/**'
+      - '.github/workflows/cdk-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, uat, prod]
+      stack_filter:
+        description: 'Stack pattern to deploy (e.g. IdpNetworkStack-dev). Leave empty for all.'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cdk-deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false  # Never cancel an in-flight deploy
+
+env:
+  AWS_REGION: ca-central-1
+  NODE_VERSION: '20'
+  CDK_VERSION: '2.140.0'
+
+jobs:
+  # ── Deploy DEV (auto on merge to main) ────────────────────────────────────
+  deploy-dev:
+    name: Deploy DEV
+    runs-on: ubuntu-22.04
+    environment:
+      name: dev
+      url: https://backstage.dev.internal.example.com
+    if: github.event_name == 'push' || github.event.inputs.environment == 'dev'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_DEV }}:role/github-actions-idp-deploy
+          role-session-name: CdkDeploy-dev-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: CDK Deploy — DEV
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_DEV: ${{ vars.AWS_ACCOUNT_DEV }}
+        run: |
+          STACK_FILTER="${{ github.event.inputs.stack_filter }}"
+          if [ -n "$STACK_FILTER" ]; then
+            cdk deploy $STACK_FILTER -c env=dev --require-approval never
+          else
+            cdk deploy "*-dev" -c env=dev --require-approval never
+          fi
+
+      - name: Run smoke tests (DEV)
+        run: |
+          chmod +x scripts/bootstrap.sh
+          ./scripts/drift-check.sh --env dev --smoke-test
+
+  # ── Deploy UAT (auto after DEV success) ───────────────────────────────────
+  deploy-uat:
+    name: Deploy UAT
+    runs-on: ubuntu-22.04
+    needs: deploy-dev
+    environment:
+      name: uat
+      url: https://backstage.uat.internal.example.com
+    if: |
+      (github.event_name == 'push' && needs.deploy-dev.result == 'success') ||
+      github.event.inputs.environment == 'uat'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_UAT }}:role/github-actions-idp-deploy
+          role-session-name: CdkDeploy-uat-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: CDK Deploy — UAT
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_UAT: ${{ vars.AWS_ACCOUNT_UAT }}
+        run: |
+          cdk deploy "*-uat" -c env=uat --require-approval never
+
+  # ── Deploy PROD (manual approval required) ────────────────────────────────
+  deploy-prod:
+    name: Deploy PROD
+    runs-on: ubuntu-22.04
+    needs: deploy-uat
+    environment:
+      name: prod             # GitHub Environment with required reviewers configured
+      url: https://backstage.internal.example.com
+    if: |
+      (github.event_name == 'push' && needs.deploy-uat.result == 'success') ||
+      github.event.inputs.environment == 'prod'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: cdk/package-lock.json
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_PROD }}:role/github-actions-idp-deploy
+          role-session-name: CdkDeploy-prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install CDK
+        run: npm install -g aws-cdk@${{ env.CDK_VERSION }}
+
+      - name: Install dependencies
+        working-directory: cdk
+        run: npm ci
+
+      - name: Pre-deploy diff (final check)
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_PROD: ${{ vars.AWS_ACCOUNT_PROD }}
+        run: |
+          cdk diff "*-prod" -c env=prod
+
+      - name: CDK Deploy — PROD
+        working-directory: cdk
+        env:
+          CDK_ACCOUNT_PROD: ${{ vars.AWS_ACCOUNT_PROD }}
+        run: |
+          STACK_FILTER="${{ github.event.inputs.stack_filter }}"
+          if [ -n "$STACK_FILTER" ]; then
+            cdk deploy $STACK_FILTER -c env=prod --require-approval never
+          else
+            # Deploy in dependency order
+            cdk deploy \
+              "IdpNetworkStack-prod" \
+              "IdpEksStack-prod" \
+              "IdpPlatformApiStack-prod" \
+              "IdpBackstageStack-prod" \
+              "IdpObservabilityStack-prod" \
+              --require-approval never \
+              --concurrency 1
+
+          fi
+
+      - name: Post-deploy validation
+        run: ./scripts/drift-check.sh --env prod --smoke-test
+
+      - name: Notify Slack on success
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "✅ CDK deploy to PROD succeeded | Run: ${{ github.run_id }} | By: ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PLATFORM_WEBHOOK }}
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "❌ CDK deploy to PROD FAILED | Run: ${{ github.run_id }} | By: ${{ github.actor }} | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Logs>"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PLATFORM_WEBHOOK }}

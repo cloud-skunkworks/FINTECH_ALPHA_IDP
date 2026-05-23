@@ -1,0 +1,27 @@
+# CODEOWNERS — IDP Platform
+# Platform team owns everything by default
+*                               @your-org/platform-engineering
+
+# CDK infrastructure — require IaC + SRE review
+/cdk/                           @your-org/platform-engineering @your-org/sre
+
+# Security policies — require security review
+/policy/                        @your-org/security @your-org/platform-engineering
+/k8s/gatekeeper/                @your-org/security @your-org/platform-engineering
+/docs/architecture/security/    @your-org/security
+
+# Platform API — require API leads + platform review
+/platform/api/                  @your-org/platform-engineering @your-org/backend-leads
+
+# AI Agents — require AI engineering + platform review
+/platform/agents/               @your-org/platform-engineering @your-org/ai-engineering
+
+# GitHub Actions workflows — require platform review
+/.github/workflows/             @your-org/platform-engineering @your-org/sre
+
+# Backstage catalog — platform owns, teams can contribute via PR
+/platform/backstage/catalog/    @your-org/platform-engineering
+
+# Documentation
+/docs/adr/                      @your-org/platform-engineering
+/docs/runbooks/                 @your-org/platform-engineering @your-org/sre

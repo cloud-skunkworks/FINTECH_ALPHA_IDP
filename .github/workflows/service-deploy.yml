@@ -1,0 +1,253 @@
+name: Service Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platform/api/**'
+      - 'platform/backstage/**'
+      - '.github/workflows/service-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to deploy'
+        required: true
+        type: choice
+        options: [platform-api, backstage, all]
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options: [dev, uat, prod]
+      action:
+        description: 'Action'
+        required: true
+        type: choice
+        options: [deploy, rollback]
+      image_tag:
+        description: 'Image tag (for rollback — leave empty for latest)'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ca-central-1
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  # ── Build & Push Platform API ─────────────────────────────────────────────
+  build-platform-api:
+    name: Build Platform API
+    runs-on: ubuntu-22.04
+    if: |
+      github.event_name == 'push' ||
+      github.event.inputs.service == 'platform-api' ||
+      github.event.inputs.service == 'all'
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_DEV }}:role/github-actions-idp-deploy
+          role-session-name: Build-PlatformApi-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr-login.outputs.registry }}/idp-platform-api-dev
+          tags: |
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: platform/api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/arm64  # Graviton
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ github.ref_name }}
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.ecr-login.outputs.registry }}/idp-platform-api-dev:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '1'  # Fail on CRITICAL or HIGH
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ── API Unit Tests ────────────────────────────────────────────────────────
+  test-platform-api:
+    name: Platform API Tests
+    runs-on: ubuntu-22.04
+    if: |
+      github.event_name == 'push' ||
+      github.event.inputs.service == 'platform-api' ||
+      github.event.inputs.service == 'all'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: platform/api
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        working-directory: platform/api
+        run: |
+          pytest tests/ -v \
+            --cov=. \
+            --cov-report=xml \
+            --cov-fail-under=80 \
+            -x
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: platform/api/coverage.xml
+          flags: platform-api
+
+  # ── Deploy Platform API to DEV ────────────────────────────────────────────
+  deploy-platform-api-dev:
+    name: Deploy Platform API → DEV
+    runs-on: ubuntu-22.04
+    needs: [build-platform-api, test-platform-api]
+    environment:
+      name: dev
+    if: |
+      github.event_name == 'push' ||
+      (github.event.inputs.service == 'platform-api' && github.event.inputs.environment == 'dev')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_DEV }}:role/github-actions-idp-deploy
+          role-session-name: Deploy-PlatformApi-dev-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS (rolling update — DEV)
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          aws ecs update-service \
+            --cluster idp-platform-dev \
+            --service idp-platform-api-dev \
+            --force-new-deployment \
+            --query 'service.serviceName' \
+            --output text
+
+          # Wait for deployment to stabilise
+          aws ecs wait services-stable \
+            --cluster idp-platform-dev \
+            --services idp-platform-api-dev
+
+      - name: Smoke test (DEV)
+        run: |
+          # Wait for ALB to route to new tasks
+          sleep 10
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            https://api.idp.dev.internal.example.com/healthz || echo "000")
+          echo "Health check status: $HTTP_STATUS"
+          [ "$HTTP_STATUS" = "200" ] || (echo "Smoke test FAILED" && exit 1)
+
+  # ── Deploy Platform API to PROD (CodeDeploy canary) ──────────────────────
+  deploy-platform-api-prod:
+    name: Deploy Platform API → PROD (Canary)
+    runs-on: ubuntu-22.04
+    needs: deploy-platform-api-dev
+    environment:
+      name: prod
+    if: |
+      (github.event_name == 'push' && needs.deploy-platform-api-dev.result == 'success') ||
+      (github.event.inputs.service == 'platform-api' && github.event.inputs.environment == 'prod')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_PROD }}:role/github-actions-idp-deploy
+          role-session-name: Deploy-PlatformApi-prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Promote image to prod ECR
+        run: |
+          # Re-tag the dev image for prod registry
+          MANIFEST=$(aws ecr batch-get-image \
+            --repository-name idp-platform-api-dev \
+            --image-ids imageTag=${{ github.sha }} \
+            --query 'images[0].imageManifest' \
+            --output text)
+
+          aws ecr put-image \
+            --repository-name idp-platform-api-prod \
+            --image-tag ${{ github.sha }} \
+            --image-manifest "$MANIFEST"
+
+      - name: Create CodeDeploy deployment (canary)
+        id: deploy
+        run: |
+          DEPLOYMENT_ID=$(aws deploy create-deployment \
+            --application-name idp-platform-api \
+            --deployment-group-name idp-platform-api-prod \
+            --deployment-config-name CodeDeployDefault.ECSCanary10Percent5Minutes \
+            --description "GitHub Actions deploy SHA ${{ github.sha }}" \
+            --revision '{"revisionType":"AppSpecContent","appSpecContent":{"content":"{\"version\":0,\"Resources\":[{\"TargetService\":{\"Type\":\"AWS::ECS::Service\",\"Properties\":{\"TaskDefinition\":\"<TASK_DEF_ARN>\",\"LoadBalancerInfo\":{\"ContainerName\":\"idp-platform-api\",\"ContainerPort\":8000}}}}]}"}}' \
+            --query 'deploymentId' \
+            --output text)
+          echo "deployment_id=$DEPLOYMENT_ID" >> $GITHUB_OUTPUT
+          echo "CodeDeploy deployment started: $DEPLOYMENT_ID"
+
+      - name: Wait for canary (10% traffic — 5 min bake time)
+        run: |
+          echo "Waiting for canary traffic shift to complete..."
+          aws deploy wait deployment-successful \
+            --deployment-id ${{ steps.deploy.outputs.deployment_id }}
+
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && '✅' || '❌' }} Platform API deployed to PROD | SHA: ${{ github.sha }} | Deployment: ${{ steps.deploy.outputs.deployment_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_PLATFORM_WEBHOOK }}

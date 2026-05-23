@@ -1,0 +1,115 @@
+# Helm values for opentelemetry-collector chart
+# Chart: open-telemetry/opentelemetry-collector v0.86.0
+# Deployment mode: DaemonSet (one collector per node)
+
+mode: daemonset
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  tag: "0.101.0"
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: otel-collector
+  annotations:
+    # IRSA — role ARN injected during CDK deploy
+    eks.amazonaws.com/role-arn: "${OTEL_COLLECTOR_ROLE_ARN}"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Mount host paths for DaemonSet metrics collection
+extraVolumes:
+  - name: hostfs
+    hostPath:
+      path: /
+  - name: varlog
+    hostPath:
+      path: /var/log
+
+extraVolumeMounts:
+  - name: hostfs
+    mountPath: /hostfs
+    readOnly: true
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+
+env:
+  - name: AWS_REGION
+    value: "ca-central-1"
+  - name: ENVIRONMENT
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.labels['environment']
+  - name: KUBE_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+  # AMP endpoint injected from CDK output — never hardcoded
+  - name: AMP_REMOTE_WRITE_ENDPOINT
+    valueFrom:
+      secretKeyRef:
+        name: otel-collector-config
+        key: amp_remote_write_endpoint
+
+ports:
+  otlp:
+    enabled: true
+    containerPort: 4317
+    protocol: TCP
+  otlp-http:
+    enabled: true
+    containerPort: 4318
+    protocol: TCP
+  metrics:
+    enabled: true
+    containerPort: 8888
+    protocol: TCP
+
+tolerations:
+  # Run on all nodes including system nodes
+  - key: CriticalAddonsOnly
+    operator: Exists
+  - effect: NoSchedule
+    operator: Exists
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8888"
+  prometheus.io/path: "/metrics"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Liveness and readiness probes
+livenessProbe:
+  httpGet:
+    path: /
+    port: 13133
+  initialDelaySeconds: 15
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 13133
+  initialDelaySeconds: 5
+  periodSeconds: 10
