@@ -8,7 +8,9 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as eks from 'aws-cdk-lib/aws-eks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import { KubectlV36Layer } from '@aws-cdk/lambda-layer-kubectl-v36';
 import { Construct } from 'constructs';
+import { IrsaRole } from '../../constructs/irsa-role';
 
 export interface ComputeStackProps extends cdk.StackProps {
   environment: string;
@@ -30,27 +32,29 @@ export class ComputeStack extends cdk.Stack {
     // See: .github/workflows/cdk-deploy.yml for how the OIDC role is assumed.
     this.clusterAdminRole = new iam.Role(this, 'ClusterAdminRole', {
       roleName: `idp-eks-admin-${environment}`,
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal('eks.amazonaws.com'),
-        new iam.AccountPrincipal(this.account),
-      ),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEKSClusterPolicy'),
-      ],
+      // Only principals in this account (GitHub OIDC deploy role, SSO roles) may assume it.
+      // The EKS service role is created separately by the Cluster construct, so the
+      // eks.amazonaws.com principal and AmazonEKSClusterPolicy are NOT needed here.
+      assumedBy: new iam.AccountPrincipal(this.account),
     });
 
+    // Pre-created so retention is applied; the cluster depends on it (below) so EKS
+    // does not create the group first and cause a name conflict.
     const controlPlaneLogGroup = new logs.LogGroup(this, 'ControlPlaneLogGroup', {
       logGroupName: `/aws/eks/idp-${environment}/cluster`,
       retention: isProd ? logs.RetentionDays.SIX_MONTHS : logs.RetentionDays.ONE_MONTH,
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
-    // EKS 1.32 — latest stable release as of the time of this refactor.
-    // To upgrade: change the version string and re-run cdk diff to review node group changes.
+    // EKS 1.36 — newest version exposed by aws-cdk-lib 2.272 (eks.KubernetesVersion.V1_36).
+    // NOTE: EKS only supports in-place control-plane upgrades one minor at a time. An existing
+    // cluster on 1.32 must step 1.33 -> 1.34 -> 1.35 -> 1.36 (one deploy each). A fresh deploy is fine.
+    // The kubectlLayer major version MUST match the cluster version.
     // Always upgrade control plane before node groups (EKS upgrade docs: https://docs.aws.amazon.com/eks/latest/userguide/update-cluster.html)
     this.cluster = new eks.Cluster(this, 'Cluster', {
       clusterName: `idp-eks-${environment}`,
-      version: eks.KubernetesVersion.of('1.32'),
+      version: eks.KubernetesVersion.V1_36,
+      kubectlLayer: new KubectlV36Layer(this, 'KubectlLayer'),
       vpc,
       vpcSubnets: [{ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
       mastersRole: this.clusterAdminRole,
@@ -73,6 +77,8 @@ export class ComputeStack extends cdk.Stack {
       },
     });
 
+    this.cluster.node.addDependency(controlPlaneLogGroup);
+
     // Shared node role — grants nodes access to ECR and CloudWatch only.
     // Business permissions (DynamoDB, S3, etc.) go on IRSA roles, NOT here.
     this.nodeRole = new iam.Role(this, 'NodeRole', {
@@ -89,7 +95,7 @@ export class ComputeStack extends cdk.Stack {
 
     // System node group runs kube-system workloads (CoreDNS, kube-proxy, OPA Gatekeeper).
     // Tainted so application pods cannot schedule here — keeps system components isolated.
-    this.cluster.addNodegroupCapacity('SystemNodeGroup', {
+    const systemNodes = this.cluster.addNodegroupCapacity('SystemNodeGroup', {
       nodegroupName: `system-${environment}`,
       instanceTypes: [new ec2.InstanceType('m7i.large')],
       minSize: isProd ? 3 : 1,
@@ -118,7 +124,7 @@ export class ComputeStack extends cdk.Stack {
 
     // Workload node group handles all developer-provisioned services.
     // Multiple instance types provide capacity flexibility; Spot in non-prod cuts cost.
-    this.cluster.addNodegroupCapacity('WorkloadNodeGroup', {
+    const workloadNodes = this.cluster.addNodegroupCapacity('WorkloadNodeGroup', {
       nodegroupName: `workload-${environment}`,
       instanceTypes: [
         new ec2.InstanceType('m7i.xlarge'),
@@ -145,32 +151,44 @@ export class ComputeStack extends cdk.Stack {
     });
 
     // Managed add-ons: EKS manages the lifecycle of these components.
-    // Pin addonVersion in production to prevent unexpected upgrades during cluster updates.
-    // To find the latest version for your K8s version:
-    //   aws eks describe-addon-versions --kubernetes-version 1.32 --addon-name <name>
-    new eks.CfnAddon(this, 'VpcCniAddon', {
-      clusterName: this.cluster.clusterName,
-      addonName: 'vpc-cni',
-      resolveConflicts: 'OVERWRITE',
+    // Pin versions via cdk.json / -c context key "idp:addonVersions", e.g.
+    //   {"vpc-cni":"v1.20.1-eksbuild.1","coredns":"...","kube-proxy":"...","aws-ebs-csi-driver":"..."}
+    // Find valid values with:
+    //   aws eks describe-addon-versions --kubernetes-version 1.36 --addon-name <name>
+    // Prod synth emits a warning for every add-on left unpinned.
+    const pins: Record<string, string> = this.node.tryGetContext('idp:addonVersions') ?? {};
+    const addon = (id: string, addonName: string, extra: Partial<eks.CfnAddonProps> = {}) => {
+      const pinned = pins[addonName];
+      if (!pinned && isProd) {
+        cdk.Annotations.of(this).addWarning(
+          `EKS add-on "${addonName}" is not pinned (context idp:addonVersions) in prod.`,
+        );
+      }
+      const a = new eks.CfnAddon(this, id, {
+        clusterName: this.cluster.clusterName,
+        addonName,
+        addonVersion: pinned,
+        resolveConflicts: 'OVERWRITE',
+        ...extra,
+      });
+      a.node.addDependency(workloadNodes);
+      a.node.addDependency(systemNodes);
+      return a;
+    };
+
+    // EBS CSI controller needs an IRSA role, otherwise the add-on goes DEGRADED.
+    const ebsCsiRole = new IrsaRole(this, 'EbsCsiIrsa', {
+      cluster: this.cluster,
+      namespace: 'kube-system',
+      serviceAccountName: 'ebs-csi-controller-sa',
+      roleName: `idp-ebs-csi-${environment}`,
+      policies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEBSCSIDriverPolicy')],
     });
 
-    new eks.CfnAddon(this, 'CoreDnsAddon', {
-      clusterName: this.cluster.clusterName,
-      addonName: 'coredns',
-      resolveConflicts: 'OVERWRITE',
-    });
-
-    new eks.CfnAddon(this, 'KubeProxyAddon', {
-      clusterName: this.cluster.clusterName,
-      addonName: 'kube-proxy',
-      resolveConflicts: 'OVERWRITE',
-    });
-
-    new eks.CfnAddon(this, 'EbsCsiAddon', {
-      clusterName: this.cluster.clusterName,
-      addonName: 'aws-ebs-csi-driver',
-      resolveConflicts: 'OVERWRITE',
-    });
+    addon('VpcCniAddon', 'vpc-cni');
+    addon('CoreDnsAddon', 'coredns');
+    addon('KubeProxyAddon', 'kube-proxy');
+    addon('EbsCsiAddon', 'aws-ebs-csi-driver', { serviceAccountRoleArn: ebsCsiRole.roleArn });
 
     // Platform namespace — IDP control-plane pods run here (OTel collector, Gatekeeper).
     this.cluster.addManifest('PlatformNamespace', {

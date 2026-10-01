@@ -108,7 +108,7 @@ log "Deploying Network Stack..."
 run bash -c "cd cdk && cdk deploy IdpNetworkStack-${ENV} -c env=${ENV} --require-approval never"
 
 log "Deploying Compute (EKS) Stack..."
-run bash -c "cd cdk && cdk deploy IdpComputeStack-${ENV} -c env=${ENV} --require-approval never"
+run bash -c "cd cdk && cdk deploy IdpEksStack-${ENV} -c env=${ENV} --require-approval never"
 
 # ── Configure kubectl ──────────────────────────────────────────────────────
 log "Updating kubeconfig..."

@@ -13,6 +13,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { Construct } from 'constructs';
 
 export interface PlatformApiStackProps extends cdk.StackProps {
@@ -24,11 +25,12 @@ export interface PlatformApiStackProps extends cdk.StackProps {
 export class PlatformApiStack extends cdk.Stack {
   public readonly ecrRepository: ecr.Repository;
   public readonly service: ecs.FargateService;
+  public readonly loadBalancer: elbv2.IApplicationLoadBalancer;
 
   constructor(scope: Construct, id: string, props: PlatformApiStackProps) {
     super(scope, id, props);
 
-    const { environment, vpc } = props;
+    const { environment, vpc, cluster } = props;
     const isProd = environment === 'prod';
 
     this.ecrRepository = new ecr.Repository(this, 'ApiRepository', {
@@ -51,7 +53,7 @@ export class PlatformApiStack extends cdk.Stack {
     });
 
     // Cognito User Pool — platform team manages user provisioning (self-sign-up is disabled).
-    // MFA is REQUIRED. Auditors: see passwordPolicy and advancedSecurityMode below.
+    // MFA is REQUIRED. Auditors: see passwordPolicy and standardThreatProtectionMode below.
     const userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: `idp-platform-${environment}`,
       selfSignUpEnabled: false,
@@ -71,8 +73,14 @@ export class PlatformApiStack extends cdk.Stack {
       mfa: cognito.Mfa.REQUIRED,
       mfaSecondFactor: { sms: false, otp: true },
       accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
-      advancedSecurityMode: cognito.AdvancedSecurityMode.ENFORCED,
+      featurePlan: cognito.FeaturePlan.PLUS,
+      standardThreatProtectionMode: cognito.StandardThreatProtectionMode.FULL_FUNCTION,
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // Client-credentials flow needs a hosted-UI domain for the /oauth2/token endpoint.
+    userPool.addDomain('Domain', {
+      cognitoDomain: { domainPrefix: `idp-platform-${environment}-${this.account}` },
     });
 
     // Three scopes map to three operations. The IDP API validates scope on every request.
@@ -120,7 +128,7 @@ export class PlatformApiStack extends cdk.Stack {
     const ecsCluster = new ecs.Cluster(this, 'EcsCluster', {
       clusterName: `idp-platform-${environment}`,
       vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
       enableFargateCapacityProviders: true,
     });
 
@@ -135,8 +143,8 @@ export class PlatformApiStack extends cdk.Stack {
 
     taskRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['eks:DescribeCluster', 'eks:ListClusters'],
-      resources: [`arn:aws:eks:${this.region}:${this.account}:cluster/idp-*`],
+      actions: ['eks:DescribeCluster'],
+      resources: [cluster.clusterArn],
     }));
 
     taskRole.addToPolicy(new iam.PolicyStatement({
@@ -208,7 +216,9 @@ export class PlatformApiStack extends cdk.Stack {
     });
 
     // Internal ALB — not internet-facing. Access via API Gateway or AWS PrivateLink.
-    // CodeDeploy blue/green strategy with canary shift; see the alarm below for auto-rollback.
+    // ECS rolling deployment with circuit-breaker rollback. (A CODE_DEPLOY controller was removed:
+    // no CodeDeploy deployment group / second target group existed, so it could never deploy.)
+    // TODO: add an HTTPS listener + ACM certificate once a private hosted zone is available.
     const albFargate = new ecs_patterns.ApplicationLoadBalancedFargateService(this, 'ApiService', {
       cluster: ecsCluster,
       taskDefinition,
@@ -217,9 +227,9 @@ export class PlatformApiStack extends cdk.Stack {
       publicLoadBalancer: false,
       assignPublicIp: false,
       taskSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      deploymentController: {
-        type: ecs.DeploymentControllerType.CODE_DEPLOY,
-      },
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
+      circuitBreaker: { rollback: true },
       capacityProviderStrategies: isProd
         ? [
             { capacityProvider: 'FARGATE', weight: 1, base: 2 },
@@ -229,6 +239,7 @@ export class PlatformApiStack extends cdk.Stack {
     });
 
     this.service = albFargate.service;
+    this.loadBalancer = albFargate.loadBalancer;
 
     const scaling = albFargate.service.autoScaleTaskCount({
       minCapacity: isProd ? 3 : 1,
@@ -248,13 +259,12 @@ export class PlatformApiStack extends cdk.Stack {
       scaleOutCooldown: cdk.Duration.seconds(30),
     });
 
-    // These alarms are wired to CodeDeploy to trigger automatic rollback.
-    // If either breaches during a canary shift, CodeDeploy rolls back to the blue environment.
+    // Service health alarms (notification wiring is added by the observability stack owner).
     new cloudwatch.Alarm(this, 'ErrorRateAlarm', {
       alarmName: `idp-platform-api-error-rate-${environment}`,
-      alarmDescription: 'HTTP 5xx error rate > threshold over 5 minutes — triggers CodeDeploy rollback',
-      metric: albFargate.loadBalancer.metricHttpCodeTarget(
-        cdk.aws_elasticloadbalancingv2.HttpCodeTarget.TARGET_5XX_COUNT,
+      alarmDescription: 'HTTP 5xx error rate > threshold over 5 minutes — alerts on-call',
+      metric: albFargate.loadBalancer.metrics.httpCodeTarget(
+        elbv2.HttpCodeTarget.TARGET_5XX_COUNT,
         { period: cdk.Duration.minutes(5), statistic: 'Sum' },
       ),
       threshold: 10,
@@ -264,8 +274,8 @@ export class PlatformApiStack extends cdk.Stack {
 
     new cloudwatch.Alarm(this, 'LatencyAlarm', {
       alarmName: `idp-platform-api-latency-p99-${environment}`,
-      alarmDescription: 'p99 latency > 2s over 5 minutes — triggers CodeDeploy rollback',
-      metric: albFargate.loadBalancer.metricTargetResponseTime({
+      alarmDescription: 'p99 latency > 2s over 5 minutes — alerts on-call',
+      metric: albFargate.loadBalancer.metrics.targetResponseTime({
         period: cdk.Duration.minutes(5),
         statistic: 'p99',
       }),

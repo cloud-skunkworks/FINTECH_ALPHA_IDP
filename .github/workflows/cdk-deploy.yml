@@ -174,7 +174,7 @@ jobs:
             # Deploy in dependency order
             cdk deploy \
               "IdpNetworkStack-prod" \
-              "IdpComputeStack-prod" \
+              "IdpEksStack-prod" \
               "IdpPlatformApiStack-prod" \
               "IdpBackstageStack-prod" \
               "IdpObservabilityStack-prod" \

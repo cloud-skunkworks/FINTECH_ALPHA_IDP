@@ -23,7 +23,7 @@ Options evaluated: AWS CDK (TypeScript), Terraform (HCL), Pulumi (TypeScript), C
 
 ## Decision
 
-We will use **AWS CDK with TypeScript** for all new infrastructure. Key constructs are encapsulated in `cdk/lib/constructs/` and consumed by stacks in `cdk/lib/stacks/`. Workload teams never write CDK directly — they use Backstage templates that trigger the IaC Agent to generate CDK configs for review.
+We will use **AWS CDK with TypeScript** for all new infrastructure. Key constructs are encapsulated in `cdk/lib/constructs/` and consumed by stacks in `cdk/lib/domains/`. Workload teams never write CDK directly — they use Backstage templates that trigger the IaC Agent to generate CDK configs for review.
 
 ---
 

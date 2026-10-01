@@ -477,7 +477,7 @@ aws ecs wait services-stable \
 
 Task definition changes must go through CDK (never manual console edits):
 
-1. Edit `cdk/lib/stacks/platform-api-stack.ts` — add to `container.environment` or `container.secrets`
+1. Edit `cdk/lib/domains/application/platform-api-stack.ts` — add to `container.environment` or `container.secrets`
 2. Submit PR → CI validates → merge → CDK deploys new task definition revision
 3. ECS automatically rolls tasks to the new definition
 
