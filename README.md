@@ -516,3 +516,13 @@ New architectural decisions must be recorded as ADRs in `docs/adr/` before imple
 **For provisioning failures:** Post in `#platform-engineering` with your job ID from the Slack notification. The Ops Agent will have already posted a triage summary in `#idp-alerts`.
 
 **For security concerns:** Do not post publicly. Contact `@security` directly or open a confidential GitHub Security Advisory.
+
+---
+
+## Demo Mode: AWS variables intentionally unset
+
+This repository is a demo platform. The `AWS_ACCOUNT_*` repository variables are deliberately left unset, and this is an accepted, safe state:
+
+- Deploy jobs in `cdk-deploy.yml` skip cleanly when `AWS_ACCOUNT_DEV`, `AWS_ACCOUNT_UAT` or `AWS_ACCOUNT_PROD` is empty, so merges to `main` never reach AWS.
+- The variables are set only for client demos. Set `AWS_ACCOUNT_DEV`, `AWS_ACCOUNT_UAT` and `AWS_ACCOUNT_PROD` (and `AWS_ACCOUNT_ID` for plan/build workflows) under Settings > Secrets and variables > Actions > Variables, then run the deploy workflow.
+- Use a fresh demo account. Code targets EKS 1.36; an existing cluster on an older version must be upgraded one minor version at a time before deploying.
