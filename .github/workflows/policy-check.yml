@@ -77,7 +77,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install bandit + safety
-        run: pip install bandit[toml] safety
+        run: pip install 'bandit[toml,sarif]' safety
 
       - name: Bandit SAST
         working-directory: platform
