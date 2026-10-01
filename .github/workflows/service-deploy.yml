@@ -42,7 +42,7 @@ jobs:
   # ── Build & Push Platform API ─────────────────────────────────────────────
   build-platform-api:
     name: Build Platform API
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: |
       github.event_name == 'push' ||
       github.event.inputs.service == 'platform-api' ||
@@ -111,7 +111,7 @@ jobs:
   # ── API Unit Tests ────────────────────────────────────────────────────────
   test-platform-api:
     name: Platform API Tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: |
       github.event_name == 'push' ||
       github.event.inputs.service == 'platform-api' ||
@@ -146,7 +146,7 @@ jobs:
   # ── Deploy Platform API to DEV ────────────────────────────────────────────
   deploy-platform-api-dev:
     name: Deploy Platform API → DEV
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build-platform-api, test-platform-api]
     environment:
       name: dev
@@ -190,7 +190,7 @@ jobs:
   # ── Deploy Platform API to PROD (CodeDeploy canary) ──────────────────────
   deploy-platform-api-prod:
     name: Deploy Platform API → PROD (Canary)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: deploy-platform-api-dev
     environment:
       name: prod

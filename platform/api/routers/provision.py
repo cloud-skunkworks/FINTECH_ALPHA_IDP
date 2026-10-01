@@ -2,6 +2,7 @@
 Provisioning router — POST /v1/provision, DELETE /v1/provision/{provision_id}
 """
 
+import json
 import uuid
 from typing import Annotated
 
@@ -10,18 +11,42 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from opentelemetry import trace
 
 from ..auth.cognito import TokenPayload, require_scope
+from ..models.catalog import CatalogTemplate
 from ..models.provision import DestroyRequest, ProvisionRequest, ProvisionResponse
 from ..services.aws_client import AWSClientFactory
 from ..services.notify import notify_slack
+from .catalog import CATALOG
 
 log = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 router = APIRouter(prefix="/v1", tags=["Provisioning"])
 
-# In-memory job store for local dev — replaced by DynamoDB in production
-# (see services/aws_client.py for the DynamoDB implementation)
-_JOB_STORE: dict[str, dict] = {}
+
+def _validate_additional_params(template: CatalogTemplate, params: dict[str, str]) -> None:
+    """Validate additional_params against the template's parameter schema (raises 422)."""
+    schema = {p.name: p for p in template.parameters}
+    errors: list[str] = []
+    for key, value in params.items():
+        spec = schema.get(key)
+        if spec is None:
+            errors.append(f"Unknown parameter '{key}' for template '{template.template_id}'.")
+        elif spec.type == "integer":
+            try:
+                number = int(value)
+            except ValueError:
+                errors.append(f"Parameter '{key}' must be an integer.")
+                continue
+            if spec.min_value is not None and number < spec.min_value:
+                errors.append(f"Parameter '{key}' must be >= {spec.min_value}.")
+            if spec.max_value is not None and number > spec.max_value:
+                errors.append(f"Parameter '{key}' must be <= {spec.max_value}.")
+        elif spec.type == "boolean" and value.lower() not in ("true", "false"):
+            errors.append(f"Parameter '{key}' must be 'true' or 'false'.")
+        elif spec.type == "enum" and value not in (spec.enum_values or []):
+            errors.append(f"Parameter '{key}' must be one of {spec.enum_values}.")
+    if errors:
+        raise HTTPException(status_code=422, detail=errors)
 
 
 @router.post(
@@ -41,6 +66,14 @@ async def provision(
     auth: Annotated[TokenPayload, Depends(require_scope("idp:provision"))],
     aws: Annotated[AWSClientFactory, Depends()],
 ) -> ProvisionResponse:
+    template = CATALOG.get(request.template_id)
+    if template is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown template_id '{request.template_id}'. Use GET /v1/catalog to list templates.",
+        )
+    _validate_additional_params(template, request.additional_params)
+
     with tracer.start_as_current_span("provision.create") as span:
         job_id = uuid.uuid4()
         workspace_name = f"idp-workload-{request.service_name}-{request.environment}"
@@ -61,7 +94,7 @@ async def provision(
             requester=auth.sub,
         )
 
-        # Persist job to DynamoDB (non-blocking — returns immediately)
+        # Persist job to DynamoDB before accepting the request
         try:
             await aws.put_job(
                 job_id=str(job_id),
@@ -110,7 +143,15 @@ async def provision(
                 environment=request.environment,
             )
         except Exception:
-            ecr_uri = f"<pending — will be created during provisioning>"
+            log.warning("provision.ecr_precreate_failed", job_id=str(job_id), exc_info=True)
+            ecr_uri = "<pending — will be created during provisioning>"
+
+        try:
+            account_id = await aws.get_account_id()
+        except Exception:
+            # Job is already persisted and queued; don't fail the request now.
+            log.warning("provision.account_lookup_failed", job_id=str(job_id), exc_info=True)
+            account_id = "<unknown>"
 
         return ProvisionResponse(
             job_id=job_id,
@@ -118,7 +159,7 @@ async def provision(
             workspace_name=workspace_name,
             ecr_repository=ecr_uri,
             irsa_role_arn=(
-                f"arn:aws:iam::{await aws.get_account_id()}:"
+                f"arn:aws:iam::{account_id}:"
                 f"role/irsa-{request.service_name}-{request.environment}"
             ),
             poll_url=f"/v1/status/{job_id}",
@@ -153,7 +194,7 @@ async def _trigger_cdk_deployment(
                 "OWNER_TEAM": request.owner_team,
                 "COST_CENTRE": request.cost_centre,
                 "REGION": request.region,
-                "ADDITIONAL_PARAMS": str(request.additional_params),
+                "ADDITIONAL_PARAMS": json.dumps(request.additional_params),
             },
         )
 
@@ -239,7 +280,8 @@ async def _trigger_cdk_destroy(
                 "REQUESTER": requester,
             },
         )
-        await aws.update_job_status(job_id=provision_id, status="DESTROYED")
+        # Status stays APPLYING: DESTROYED is set when the destroy build reports
+        # completion, not when it is merely started.
     except Exception as exc:
         log.error("provision.destroy.failed", provision_id=provision_id, error=str(exc))
         await aws.update_job_status(job_id=provision_id, status="FAILED", error_message=str(exc))

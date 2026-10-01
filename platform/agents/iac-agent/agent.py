@@ -1,8 +1,9 @@
 """
 IaC Agent — Generates AWS CDK workspace configuration from a provisioning request.
 
-Triggered by POST /v1/provision. Produces TypeScript CDK code that is committed
-to a GitHub PR for human review before deployment.
+Invoked by the provisioning workflow (not called directly by the API process).
+Produces TypeScript CDK code that is committed to a GitHub PR for human review
+before deployment.
 
 Security constraints:
 - Agent has READ-ONLY AWS access (describes resources, no mutations)
@@ -13,6 +14,8 @@ Security constraints:
 
 import json
 import os
+import re
+import time
 from pathlib import Path
 from typing import TypedDict
 
@@ -22,7 +25,16 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-client = anthropic.Anthropic()  # API key from ANTHROPIC_API_KEY env var
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    """Lazy client so importing this module doesn't require ANTHROPIC_API_KEY."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()  # API key from ANTHROPIC_API_KEY env var
+    return _client
+
 
 SYSTEM_PROMPT = Path(__file__).parent / "prompts" / "generate_workspace.md"
 AUDIT_BUCKET = os.environ.get("AGENT_AUDIT_BUCKET", "")
@@ -81,9 +93,9 @@ CONSTRAINTS (non-negotiable):
 9. PCI-DSS context: no PII in resource names, logs, or tags
 """
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
-        max_tokens=4096,
+        max_tokens=8192,
         system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     )
@@ -103,15 +115,18 @@ CONSTRAINTS (non-negotiable):
     except json.JSONDecodeError as e:
         log.error("iac_agent.generate.parse_error", job_id=job_id, error=str(e))
         # Attempt to extract JSON from markdown code blocks
-        import re
-        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw_response, re.DOTALL)
+        match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_response, re.DOTALL)
         if match:
             config = json.loads(match.group(1))
         else:
             raise ValueError(f"IaC Agent returned unparseable response: {e}") from e
 
+    missing = set(WorkspaceConfig.__annotations__) - set(config)
+    if missing:
+        raise ValueError(f"IaC Agent response missing keys: {sorted(missing)}")
+
     log.info("iac_agent.generate.success", job_id=job_id)
-    return WorkspaceConfig(**config)
+    return WorkspaceConfig(**{k: config[k] for k in WorkspaceConfig.__annotations__})
 
 
 def _audit_log(job_id: str, agent: str, input_data: dict, output_data: str) -> None:
@@ -120,7 +135,6 @@ def _audit_log(job_id: str, agent: str, input_data: dict, output_data: str) -> N
         log.debug("iac_agent.audit_log.skipped", reason="AGENT_AUDIT_BUCKET not set")
         return
 
-    import time
     key = f"agents/{agent}/{time.strftime('%Y/%m/%d')}/{job_id}.json"
     record = {
         "job_id": job_id,

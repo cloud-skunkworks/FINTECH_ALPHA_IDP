@@ -18,14 +18,14 @@ concurrency:
 
 env:
   AWS_REGION: ca-central-1
-  NODE_VERSION: '20'
-  CDK_VERSION: '2.140.0'
+  NODE_VERSION: '24'
+  CDK_VERSION: '2.1143.0'
 
 jobs:
   # ── Lint & Type Check ───────────────────────────────────────────────────
   lint:
     name: Lint & Type Check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +50,7 @@ jobs:
   # ── CDK Synth ─────────────────────────────────────────────────────────────
   synth:
     name: CDK Synth
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: lint
     outputs:
       has_changes: ${{ steps.diff.outputs.has_changes }}
@@ -119,7 +119,7 @@ jobs:
   # ── OPA Policy Check ──────────────────────────────────────────────────────
   policy-check:
     name: OPA Policy Check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: synth
     steps:
       - uses: actions/checkout@v4
@@ -133,13 +133,13 @@ jobs:
       - name: Install OPA
         run: |
           curl -L -o /usr/local/bin/opa \
-            https://github.com/open-policy-agent/opa/releases/download/v0.65.0/opa_linux_amd64
+            https://github.com/open-policy-agent/opa/releases/download/v1.21.1/opa_linux_amd64
           chmod +x /usr/local/bin/opa
 
       - name: Install conftest
         run: |
           curl -L -o /tmp/conftest.tar.gz \
-            https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz
+            https://github.com/open-policy-agent/conftest/releases/download/v0.71.0/conftest_0.71.0_Linux_x86_64.tar.gz
           tar -xzf /tmp/conftest.tar.gz -C /usr/local/bin/ conftest
 
       - name: Run OPA Rego tests
@@ -155,7 +155,7 @@ jobs:
   # ── Security Scan (checkov) ───────────────────────────────────────────────
   security-scan:
     name: Security Scan
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: synth
     steps:
       - uses: actions/checkout@v4
@@ -178,7 +178,7 @@ jobs:
   # ── Cost Estimate ──────────────────────────────────────────────────────────
   cost-estimate:
     name: Cost Estimate
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: synth
     if: github.event_name == 'pull_request'
     steps:
@@ -211,7 +211,7 @@ jobs:
   # ── Post Summary Comment ──────────────────────────────────────────────────
   post-comment:
     name: Post Plan Summary
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [synth, policy-check, security-scan]
     if: always() && github.event_name == 'pull_request'
     steps:

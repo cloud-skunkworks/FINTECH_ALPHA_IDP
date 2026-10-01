@@ -7,8 +7,8 @@
 #
 # Prerequisites:
 #   - AWS CLI v2 configured with admin credentials
-#   - Node.js 20 + npm
-#   - CDK CLI 2.140+
+#   - Node.js 24 LTS + npm
+#   - CDK CLI 2.1143+
 #   - kubectl
 #   - Helm 3.14+
 #
@@ -27,18 +27,15 @@ ENV=""
 DRY_RUN=false
 SKIP_HELM=false
 SKIP_K8S=false
+SMOKE_ONLY=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --env) ENV="$2"; shift 2 ;;
+    --env) [[ $# -ge 2 ]] || { echo "--env requires a value"; exit 1; }; ENV="$2"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --skip-helm) SKIP_HELM=true; shift ;;
     --skip-k8s) SKIP_K8S=true; shift ;;
-    --smoke-test)
-      # Run only smoke tests against an already-deployed environment
-      ./scripts/smoke-test.sh --env "$ENV"
-      exit 0
-      ;;
+    --smoke-test) SMOKE_ONLY=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -51,6 +48,13 @@ fi
 if [[ "$ENV" != "dev" && "$ENV" != "uat" && "$ENV" != "prod" ]]; then
   echo "Invalid environment: $ENV. Must be dev, uat, or prod."
   exit 1
+fi
+
+# ── Smoke-test only mode (after ENV is parsed, regardless of flag order) ──
+if [[ "$SMOKE_ONLY" == "true" ]]; then
+  SMOKE_ARGS=(--env "$ENV")
+  [[ "$DRY_RUN" == "true" ]] && SMOKE_ARGS+=(--dry-run)
+  exec "$(dirname "${BASH_SOURCE[0]}")/smoke-test.sh" "${SMOKE_ARGS[@]}"
 fi
 
 # ── Safety check for prod ──────────────────────────────────────────────────
@@ -77,7 +81,7 @@ run() {
 log "Checking prerequisites..."
 command -v aws >/dev/null || { echo "aws CLI not found"; exit 1; }
 command -v node >/dev/null || { echo "node not found"; exit 1; }
-command -v cdk >/dev/null || { echo "cdk not found. Run: npm install -g aws-cdk@2.140.0"; exit 1; }
+command -v cdk >/dev/null || { echo "cdk not found. Run: npm install -g aws-cdk@2.1143.0"; exit 1; }
 command -v kubectl >/dev/null || { echo "kubectl not found"; exit 1; }
 command -v helm >/dev/null || { echo "helm not found"; exit 1; }
 
@@ -103,8 +107,8 @@ run bash -c "cd cdk && npm ci"
 log "Deploying Network Stack..."
 run bash -c "cd cdk && cdk deploy IdpNetworkStack-${ENV} -c env=${ENV} --require-approval never"
 
-log "Deploying EKS Stack..."
-run bash -c "cd cdk && cdk deploy IdpEksStack-${ENV} -c env=${ENV} --require-approval never"
+log "Deploying Compute (EKS) Stack..."
+run bash -c "cd cdk && cdk deploy IdpComputeStack-${ENV} -c env=${ENV} --require-approval never"
 
 # ── Configure kubectl ──────────────────────────────────────────────────────
 log "Updating kubeconfig..."
@@ -157,10 +161,15 @@ if [[ "$SKIP_HELM" == "false" ]]; then
 
   if [[ -n "$AMP_ENDPOINT" && -n "$OTEL_ROLE_ARN" ]]; then
     log "Installing OTel Collector..."
-    run kubectl create secret generic otel-collector-config \
-      --namespace monitoring \
-      --from-literal=amp_remote_write_endpoint="${AMP_ENDPOINT}api/v1/remote_write" \
-      --dry-run=client -o yaml | kubectl apply -f -
+    SECRET_CMD=(kubectl create secret generic otel-collector-config
+      --namespace monitoring
+      --from-literal=amp_remote_write_endpoint="${AMP_ENDPOINT}api/v1/remote_write"
+      --dry-run=client -o yaml)
+    if [[ "$DRY_RUN" == "true" ]]; then
+      echo "[DRY-RUN] ${SECRET_CMD[*]} | kubectl apply -f -"
+    else
+      "${SECRET_CMD[@]}" | kubectl apply -f -
+    fi
 
     run helm upgrade --install otel-collector open-telemetry/opentelemetry-collector \
       --namespace monitoring \

@@ -1,5 +1,6 @@
 """Pydantic models for the provisioning API."""
 
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -10,15 +11,15 @@ class ProvisionRequest(BaseModel):
     """
     Request body for POST /v1/provision.
 
-    service_name must match ^[a-z][a-z0-9-]+$ and be globally unique within the environment.
-    cost_centre must be a valid CC-NNNN code.
+    service_name must match ^[a-z][a-z0-9-]*[a-z0-9]$ (a valid DNS label) and be globally unique within the environment.
+    cost_centre must be a valid CC-NNNN code (4 or more digits).
     """
 
     service_name: str = Field(
         ...,
         min_length=3,
         max_length=40,
-        pattern=r"^[a-z][a-z0-9-]+$",
+        pattern=r"^[a-z][a-z0-9-]*[a-z0-9]$",
         description=(
             "Lowercase alphanumeric with hyphens. Used as the Kubernetes namespace, "
             "ECR repository name prefix, and AWS resource name prefix."
@@ -86,7 +87,7 @@ class ProvisionRequest(BaseModel):
         if not v.startswith("CC-"):
             raise ValueError("cost_centre must begin with 'CC-' (e.g. CC-1234)")
         code = v[3:]
-        if not code.isdigit() or len(code) < 4:
+        if not re.fullmatch(r"[0-9]{4,}", code):  # ASCII digits only
             raise ValueError("cost_centre format must be CC-NNNN (4+ digits)")
         return v
 

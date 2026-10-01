@@ -7,11 +7,11 @@ Returns PASS / WARN / BLOCK verdict with per-finding details.
 Security constraints:
 - READ-ONLY AWS access
 - Cannot call CDK deploy or any mutating AWS API
-- All I/O logged to audit S3 bucket
+- NOTE: audit logging to S3 is NOT yet implemented in this agent (only iac-agent has it)
 """
 
 import json
-import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,7 +21,15 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-client = anthropic.Anthropic()
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    """Lazy client so importing this module doesn't require ANTHROPIC_API_KEY."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()
+    return _client
 
 SYSTEM_PROMPT = Path(__file__).parent / "prompts" / "review_plan.md"
 MODEL = "claude-sonnet-4-6"
@@ -131,7 +139,7 @@ CDK DIFF OUTPUT:
 {synth_context}
 """
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
         max_tokens=2048,
         system=system_prompt,
@@ -141,28 +149,45 @@ CDK DIFF OUTPUT:
     raw = response.content[0].text
     log.info("review_agent.response_received", job_id=job_id, verdict_preview=raw[:100])
 
+    def _fallback() -> ReviewResult:
+        return ReviewResult(
+            verdict="WARN",
+            summary="Review agent could not parse CDK plan. Manual review required.",
+            findings=[Finding(severity="WARN", rule="parse-error", resource="review-agent", detail=raw[:500])],
+            cost_delta_usd_monthly=None,
+            recommended_action="Manually review the CDK diff before approving.",
+        )
+
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        import re
-        match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
-        if match:
-            data = json.loads(match.group(1))
-        else:
-            # Fallback: return WARN if parsing fails
-            return ReviewResult(
-                verdict="WARN",
-                summary="Review agent could not parse CDK plan. Manual review required.",
-                findings=[Finding(severity="WARN", rule="parse-error", resource="review-agent", detail=raw[:500])],
-                cost_delta_usd_monthly=None,
-                recommended_action="Manually review the CDK diff before approving.",
-            )
+        match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
+        try:
+            data = json.loads(match.group(1)) if match else None
+        except json.JSONDecodeError:
+            data = None
+    if not isinstance(data, dict):
+        return _fallback()
 
-    findings = [Finding(**f) for f in data.get("findings", [])]
-    return ReviewResult(
-        verdict=data["verdict"],
-        summary=data["summary"],
-        findings=findings,
-        cost_delta_usd_monthly=data.get("cost_delta_usd_monthly"),
-        recommended_action=data["recommended_action"],
-    )
+    # Validate the model output; anything malformed degrades to WARN, never a crash/PASS.
+    try:
+        findings = [
+            Finding(
+                severity=f["severity"], rule=f["rule"], resource=f["resource"], detail=f["detail"]
+            )
+            for f in data.get("findings", [])
+        ]
+        verdict = data["verdict"]
+        if verdict not in ("PASS", "WARN", "BLOCK") or any(
+            f.severity not in ("INFO", "WARN", "BLOCK") for f in findings
+        ):
+            return _fallback()
+        return ReviewResult(
+            verdict=verdict,
+            summary=data["summary"],
+            findings=findings,
+            cost_delta_usd_monthly=data.get("cost_delta_usd_monthly"),
+            recommended_action=data["recommended_action"],
+        )
+    except (KeyError, TypeError):
+        return _fallback()

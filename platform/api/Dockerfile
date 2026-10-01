@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip==24.0 \
+RUN pip install --no-cache-dir --upgrade pip==26.2.1 \
  && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # ── Runtime Stage ──────────────────────────────────────────────────────────
@@ -40,8 +40,8 @@ COPY --from=builder /install /usr/local
 
 WORKDIR /app
 
-# Copy application code
-COPY --chown=idp:idp . .
+# Copy application code as the `api` package (main.py uses relative imports)
+COPY --chown=idp:idp . ./api
 
 # Drop to non-root
 USER idp
@@ -53,7 +53,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -f http://localhost:8000/healthz || exit 1
 
 # 4 workers for ARM64/Graviton — tune based on vCPU allocation
-CMD ["uvicorn", "main:app", \
+CMD ["uvicorn", "api.main:app", \
      "--host", "0.0.0.0", \
      "--port", "8000", \
      "--workers", "4", \

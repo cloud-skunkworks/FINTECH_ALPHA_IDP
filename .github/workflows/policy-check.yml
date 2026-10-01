@@ -11,12 +11,12 @@ permissions:
   pull-requests: write
 
 env:
-  OPA_VERSION: '0.65.0'
+  OPA_VERSION: '1.21.1'
 
 jobs:
   opa-tests:
     name: OPA Rego Tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -35,23 +35,18 @@ jobs:
         run: |
           opa test policy/rego/ policy/tests/ \
             --coverage \
-            --format json | tee /tmp/coverage.json
-          # Require ≥ 80% coverage
-          COVERAGE=$(cat /tmp/coverage.json | python3 -c "
-          import json, sys
-          data = json.load(sys.stdin)
-          files = data.get('files', {})
-          covered = sum(f.get('covered_lines', 0) for f in files.values())
-          total = sum(f.get('total_lines', 0) for f in files.values())
-          pct = (covered / total * 100) if total > 0 else 0
-          print(f'{pct:.1f}')
-          ")
-          echo "OPA policy coverage: $COVERAGE%"
-          python3 -c "assert float('$COVERAGE') >= 80, f'Coverage {$COVERAGE}% is below 80% threshold'"
+            --format json > /tmp/coverage.json
+          # Require >= 80% coverage (OPA reports an overall percentage in `coverage`)
+          python3 - <<'PY'
+          import json
+          pct = json.load(open('/tmp/coverage.json')).get('coverage', 0.0)
+          print(f'OPA policy coverage: {pct:.1f}%')
+          assert pct >= 80, f'Coverage {pct:.1f}% is below 80% threshold'
+          PY
 
   checkov:
     name: Checkov Security Scan
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -73,7 +68,7 @@ jobs:
 
   python-security:
     name: Python Security Scan
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -108,7 +103,7 @@ jobs:
 
   secret-scan:
     name: Secret Scan
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
