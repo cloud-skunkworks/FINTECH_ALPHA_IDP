@@ -39,7 +39,7 @@ jobs:
     environment:
       name: dev
       url: https://backstage.dev.internal.example.com
-    if: github.event_name == 'push' || github.event.inputs.environment == 'dev'
+    if: vars.AWS_ACCOUNT_DEV != '' && (github.event_name == 'push' || github.event.inputs.environment == 'dev')
     steps:
       - uses: actions/checkout@v4
 
@@ -89,8 +89,9 @@ jobs:
       name: uat
       url: https://backstage.uat.internal.example.com
     if: |
+      vars.AWS_ACCOUNT_UAT != '' && (
       (github.event_name == 'push' && needs.deploy-dev.result == 'success') ||
-      github.event.inputs.environment == 'uat'
+      github.event.inputs.environment == 'uat')
     steps:
       - uses: actions/checkout@v4
 
@@ -130,8 +131,9 @@ jobs:
       name: prod             # GitHub Environment with required reviewers configured
       url: https://backstage.internal.example.com
     if: |
+      vars.AWS_ACCOUNT_PROD != '' && (
       (github.event_name == 'push' && needs.deploy-uat.result == 'success') ||
-      github.event.inputs.environment == 'prod'
+      github.event.inputs.environment == 'prod')
     steps:
       - uses: actions/checkout@v4
 

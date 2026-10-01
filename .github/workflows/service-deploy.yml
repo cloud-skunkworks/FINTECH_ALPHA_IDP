@@ -93,7 +93,7 @@ jobs:
             VERSION=${{ github.ref_name }}
 
       - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@v0.36.0  # pinned; bump deliberately
         with:
           image-ref: ${{ steps.ecr-login.outputs.registry }}/idp-platform-api-dev:${{ github.sha }}
           format: sarif
