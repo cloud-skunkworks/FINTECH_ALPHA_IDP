@@ -44,7 +44,7 @@ Install these before performing any procedure in this playbook.
 nvm install 20 && nvm use 20
 
 # AWS CDK CLI (pinned version — match cdk/package.json)
-npm install -g aws-cdk@2.140.0
+npm install -g aws-cdk@2.1143.0
 
 # AWS CLI v2
 # macOS:
@@ -56,7 +56,7 @@ unzip awscliv2.zip && sudo ./aws/install
 # Python 3.12 (use pyenv)
 pyenv install 3.12 && pyenv local 3.12
 
-# kubectl (matches EKS 1.30)
+# kubectl (matches EKS 1.36)
 brew install kubectl
 # or: curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
 

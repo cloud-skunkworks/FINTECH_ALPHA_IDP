@@ -19,5 +19,14 @@ Versions below were checked against registries where the proxy allowed; items ma
 - Policy: OPA 1.x syntax migration, `no_public_endpoints` parse error, `irsa_required` unreachable deny; tests added for every policy.
 - Tests: fixture overrode nothing (`require_scope` closures); replaced with `get_token_payload` override. API 11 to 100 tests, new CDK (23) and OPA (24) suites.
 
+### Post-merge remediation (RC2.1)
+- `service-deploy.yml`: removed duplicate `id-token` key (workflow was invalid since RC1).
+- Checkov: `platform-viewer` ClusterRole now lists explicit read-only resources (no wildcard); k8s scan 21/21.
+- Bandit SARIF extra installed; Gitleaks switched from the license-gated action to the v8.30.1 CLI.
+- `trivy-action` pinned to `v0.36.0` (was `@master`).
+- `cdk-deploy.yml`: deploy jobs skip when `AWS_ACCOUNT_<ENV>` repo variables are unset, instead of failing at OIDC.
+- Docs: stale EKS/CDK versions refreshed in `PLAYBOOK.md` and `docs/architecture/overview.md`.
+- Correction to PR #1 text: Cognito auth uses PyJWT (not python-jose) and boto3 is still a dependency.
+
 ### Known open items
 Backstage approval-gate ordering and missing `skeleton/`; no ownership check on status/destroy; ALB listener is HTTP only (TODO); SQS queue referenced by API role is not defined; agents have no `requirements.txt`; add-on versions unpinned.

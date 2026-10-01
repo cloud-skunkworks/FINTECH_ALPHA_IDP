@@ -52,12 +52,12 @@ Ongoing:
 | IaC Agent | Claude Sonnet (Anthropic) | Lambda / CodeBuild | CDK code generation |
 | Review Agent | Claude Sonnet (Anthropic) | GitHub Actions | Plan security review |
 | Ops Agent | Claude Sonnet (Anthropic) | Lambda | Alert triage |
-| EKS Cluster | EKS 1.30 + Karpenter | VPC private subnets | Container orchestration |
+| EKS Cluster | EKS 1.36 + Karpenter | VPC private subnets | Container orchestration |
 | OTel Collector | otel-collector-contrib 0.101 | EKS DaemonSet | Traces, metrics, logs |
 | Metrics Backend | Amazon Managed Prometheus | AWS managed | Long-term metric storage |
 | Dashboards | Grafana (self-hosted on EKS) | EKS | Visualization + alerting |
 | Policy Enforcement | OPA Gatekeeper 3.16 | EKS admission | K8s policy enforcement |
-| IaC | AWS CDK 2.140 (TypeScript) | GitHub Actions + CDK | CloudFormation synthesis |
+| IaC | AWS CDK 2.272 (TypeScript) | GitHub Actions + CDK | CloudFormation synthesis |
 | CI/CD | GitHub Actions | GitHub | Build, test, deploy |
 | Container Registry | Amazon ECR | AWS managed | Docker image storage |
 | Job State | DynamoDB | AWS managed | Provisioning job tracking |
