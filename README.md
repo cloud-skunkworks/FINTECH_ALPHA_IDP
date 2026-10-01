@@ -1,6 +1,6 @@
 # IDP Platform — FinTech Infrastructure Vending Machine - Prototype Generic
 
-> **Classification:** Internal Engineering — Confidential  
+> **Classification:** Internal Engineering — Demonstrator 10/1  
 > **Version:** 1.0  
 > **Regulatory Scope:** PCI-DSS v4.0 · SOC 2 Type II · PIPEDA  
 > **Stack:** AWS CDK · EKS 1.36 · GitHub Actions · FastAPI · Backstage · OpenTelemetry · Claude AI
