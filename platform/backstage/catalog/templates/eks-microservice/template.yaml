@@ -20,7 +20,7 @@ spec:
         service_name:
           title: Service Name
           type: string
-          pattern: "^[a-z][a-z0-9-]+$"
+          pattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
           minLength: 3
           maxLength: 40
           description: "Lowercase alphanumeric with hyphens (e.g. payments-api). Used as the Kubernetes namespace and AWS resource prefix."
@@ -102,7 +102,7 @@ spec:
       input:
         repoUrl: github.com?repo=idp-platform&owner=your-org
         title: "feat(idp): provision ${{ parameters.service_name }}-${{ parameters.environment }}"
-        branchName: "idp/provision-${{ parameters.service_name }}-${{ parameters.environment }}-${{ '' | now | date('X') }}"
+        branchName: "idp/provision-${{ parameters.service_name }}-${{ parameters.environment }}"
         description: |
           ## IDP Provisioning Request
 
@@ -148,8 +148,8 @@ spec:
 
           1. Approve the pull request (auto-approved for `dev`)
           2. After merge, CDK will deploy within ~10 minutes
-          3. Poll `GET /v1/status/<job_id>` or check this page for live status
-          4. Once complete, push your container image to: `<ecr_uri>:latest`
+          3. Poll `GET /v1/status/${{ steps['call-idp-api'].output.body.job_id }}` for live status
+          4. Once complete, push your container image to: `${{ steps['call-idp-api'].output.body.ecr_repository }}:latest`
           5. Create a Kubernetes Deployment referencing the provisioned namespace and ServiceAccount
 
           **Target:** ≤ 15 minutes from now to running infrastructure.

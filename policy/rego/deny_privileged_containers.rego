@@ -1,10 +1,10 @@
 package kubernetes.admission
 
-import future.keywords.in
+import rego.v1
 
 # Deny privileged containers — PCI-DSS requirement
 # Privileged containers have full access to the host and can escape the container sandbox.
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	container := input.request.object.spec.containers[_]
 	container.securityContext.privileged == true
@@ -15,7 +15,7 @@ deny[msg] {
 }
 
 # Deny init containers running as privileged
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	container := input.request.object.spec.initContainers[_]
 	container.securityContext.privileged == true
@@ -26,7 +26,7 @@ deny[msg] {
 }
 
 # Deny containers running as root (UID 0)
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	container := input.request.object.spec.containers[_]
 	container.securityContext.runAsUser == 0
@@ -37,7 +37,7 @@ deny[msg] {
 }
 
 # Deny runAsNonRoot: false
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	container := input.request.object.spec.containers[_]
 	container.securityContext.runAsNonRoot == false
@@ -48,7 +48,7 @@ deny[msg] {
 }
 
 # Deny allowPrivilegeEscalation: true
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	container := input.request.object.spec.containers[_]
 	container.securityContext.allowPrivilegeEscalation == true
@@ -59,7 +59,7 @@ deny[msg] {
 }
 
 # Deny host PID namespace sharing
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	input.request.object.spec.hostPID == true
 	msg := sprintf(
@@ -69,7 +69,7 @@ deny[msg] {
 }
 
 # Deny host network
-deny[msg] {
+deny contains msg if {
 	input.request.kind.kind == "Pod"
 	input.request.object.spec.hostNetwork == true
 	msg := sprintf(

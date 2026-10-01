@@ -5,6 +5,7 @@ All AWS interactions go through this class. Uses boto3 with the ECS task role
 (IRSA on EKS) — no static credentials anywhere.
 """
 
+import asyncio
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -60,14 +61,14 @@ class AWSClientFactory:
     async def health_check(self) -> bool:
         """Verify AWS connectivity on startup."""
         try:
-            self.sts.get_caller_identity()
+            await asyncio.to_thread(self.sts.get_caller_identity)
             return True
         except Exception as e:
             log.error("aws.health_check.failed", error=str(e))
             return False
 
     async def get_account_id(self) -> str:
-        identity = self.sts.get_caller_identity()
+        identity = await asyncio.to_thread(self.sts.get_caller_identity)
         return identity["Account"]
 
     async def put_job(
@@ -84,7 +85,8 @@ class AWSClientFactory:
     ) -> None:
         """Create a new job record in DynamoDB."""
         now = datetime.now(timezone.utc).isoformat()
-        self.ddb.put_item(
+        await asyncio.to_thread(
+            self.ddb.put_item,
             TableName=_JOB_TABLE,
             Item={
                 "job_id": {"S": job_id},
@@ -108,14 +110,16 @@ class AWSClientFactory:
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Retrieve a job record from DynamoDB."""
         try:
-            response = self.ddb.get_item(
+            response = await asyncio.to_thread(
+                self.ddb.get_item,
                 TableName=_JOB_TABLE,
                 Key={"job_id": {"S": job_id}},
                 ConsistentRead=True,
             )
         except ClientError as e:
+            # Do not mask backend failures as "job not found" (404): propagate (-> 500).
             log.error("aws.job.get_failed", job_id=job_id, error=str(e))
-            return None
+            raise
 
         item = response.get("Item")
         if not item:
@@ -169,7 +173,8 @@ class AWSClientFactory:
             update_expr += ", resources_created = :r"
             expr_values[":r"] = {"L": [{"S": r} for r in resources_created]}
 
-        self.ddb.update_item(
+        await asyncio.to_thread(
+            self.ddb.update_item,
             TableName=_JOB_TABLE,
             Key={"job_id": {"S": job_id}},
             UpdateExpression=update_expr,
@@ -190,13 +195,14 @@ class AWSClientFactory:
         uri = f"{account_id}.dkr.ecr.{_REGION}.amazonaws.com/{name}"
 
         try:
-            self.ecr.describe_repositories(repositoryNames=[name])
+            await asyncio.to_thread(self.ecr.describe_repositories, repositoryNames=[name])
             log.info("aws.ecr.already_exists", name=name)
             return uri
         except self.ecr.exceptions.RepositoryNotFoundException:
             pass
 
-        self.ecr.create_repository(
+        await asyncio.to_thread(
+            self.ecr.create_repository,
             repositoryName=name,
             imageScanningConfiguration={"scanOnPush": True},
             encryptionConfiguration={"encryptionType": "AES256"},
@@ -221,7 +227,8 @@ class AWSClientFactory:
             {"name": k, "value": v, "type": "PLAINTEXT"}
             for k, v in environment_variables.items()
         ]
-        response = self.codebuild.start_build(
+        response = await asyncio.to_thread(
+            self.codebuild.start_build,
             projectName=project_name,
             environmentVariablesOverride=env_overrides,
         )

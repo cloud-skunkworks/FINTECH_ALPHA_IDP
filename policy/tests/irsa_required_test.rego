@@ -1,11 +1,12 @@
 package kubernetes.admission_test
 
 import data.kubernetes.admission
-import future.keywords.in
+
+import rego.v1
 
 # ── IRSA Tests ─────────────────────────────────────────────────────────────
 
-test_deny_serviceaccount_without_irsa_annotation {
+test_deny_serviceaccount_without_irsa_annotation if {
 	# ServiceAccount in a workload namespace without IRSA annotation → BLOCK
 	msgs := admission.deny with input as {
 		"request": {
@@ -24,7 +25,7 @@ test_deny_serviceaccount_without_irsa_annotation {
 	contains(msg, "must have annotation")
 }
 
-test_allow_serviceaccount_with_irsa_annotation {
+test_allow_serviceaccount_with_irsa_annotation if {
 	# ServiceAccount with IRSA annotation → allow
 	msgs := admission.deny with input as {
 		"request": {
@@ -41,7 +42,7 @@ test_allow_serviceaccount_with_irsa_annotation {
 	count(msgs) == 0
 }
 
-test_allow_serviceaccount_in_kube_system {
+test_allow_serviceaccount_in_kube_system if {
 	# kube-system ServiceAccounts are exempt
 	msgs := admission.deny with input as {
 		"request": {
@@ -58,7 +59,7 @@ test_allow_serviceaccount_in_kube_system {
 	count(msgs) == 0
 }
 
-test_allow_serviceaccount_in_monitoring {
+test_allow_serviceaccount_in_monitoring if {
 	# monitoring namespace is exempt
 	msgs := admission.deny with input as {
 		"request": {
@@ -77,7 +78,7 @@ test_allow_serviceaccount_in_monitoring {
 
 # ── Privileged Container Tests ─────────────────────────────────────────────
 
-test_deny_privileged_container {
+test_deny_privileged_container if {
 	msgs := admission.deny with input as {
 		"request": {
 			"kind": {"kind": "Pod"},
@@ -98,7 +99,7 @@ test_deny_privileged_container {
 	contains(msg, "Privileged containers")
 }
 
-test_allow_non_privileged_container {
+test_allow_non_privileged_container if {
 	msgs := admission.deny with input as {
 		"request": {
 			"kind": {"kind": "Pod"},
@@ -122,7 +123,7 @@ test_allow_non_privileged_container {
 	count(msgs) == 0
 }
 
-test_deny_root_container {
+test_deny_root_container if {
 	msgs := admission.deny with input as {
 		"request": {
 			"kind": {"kind": "Pod"},
@@ -143,7 +144,7 @@ test_deny_root_container {
 
 # ── Public Endpoint Tests ──────────────────────────────────────────────────
 
-test_deny_public_loadbalancer {
+test_deny_public_loadbalancer if {
 	msgs := admission.deny with input as {
 		"request": {
 			"kind": {"kind": "Service"},
@@ -162,7 +163,7 @@ test_deny_public_loadbalancer {
 	contains(msg, "internal annotation")
 }
 
-test_allow_internal_loadbalancer {
+test_allow_internal_loadbalancer if {
 	msgs := admission.deny with input as {
 		"request": {
 			"kind": {"kind": "Service"},
@@ -176,5 +177,23 @@ test_allow_internal_loadbalancer {
 			},
 		},
 	}
+	count(msgs) == 0
+}
+
+test_warn_irsa_arn_bad_format if {
+	msgs := admission.warn with input as {"request": {"kind": {"kind": "ServiceAccount"}, "object": {"metadata": {
+		"name": "payments-api",
+		"namespace": "payments",
+		"annotations": {"eks.amazonaws.com/role-arn": "not-an-arn"},
+	}}}}
+	count(msgs) == 1
+}
+
+test_no_warn_irsa_arn_valid if {
+	msgs := admission.warn with input as {"request": {"kind": {"kind": "ServiceAccount"}, "object": {"metadata": {
+		"name": "payments-api",
+		"namespace": "payments",
+		"annotations": {"eks.amazonaws.com/role-arn": "arn:aws:iam::123456789012:role/irsa-payments-prod"},
+	}}}}
 	count(msgs) == 0
 }

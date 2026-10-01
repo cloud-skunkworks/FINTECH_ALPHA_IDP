@@ -32,7 +32,7 @@ integrations:
       token: ${GITHUB_TOKEN}
 
 auth:
-  # AWS Cognito SSO — developers authenticate with their Identity Center credentials
+  # Developers sign in to Backstage with GitHub OAuth (the IDP API itself uses Cognito JWTs)
   environment: development
   providers:
     github:
@@ -55,17 +55,20 @@ catalog:
       target: ./catalog/templates/eks-microservice/template.yaml
       rules:
         - allow: [Template]
-    - type: file
-      target: ./catalog/templates/ecs-fargate-service/template.yaml
-      rules:
-        - allow: [Template]
-    - type: file
-      target: ./catalog/templates/s3-data-bucket/template.yaml
-      rules:
-        - allow: [Template]
+    # TODO: add ecs-fargate-service and s3-data-bucket once their template.yaml
+    # files exist under ./catalog/templates/ (the API catalog already lists them).
     # Registered components
     - type: url
       target: https://github.com/your-org/idp-platform/blob/main/platform/backstage/catalog/components/platform-api.yaml
+
+# Backstage proxy used by the scaffolder (/api/proxy/idp-platform-api/v1/...).
+# IDP_API_TOKEN must be a valid Cognito access token with idp:provision/idp:read scopes.
+proxy:
+  endpoints:
+    /idp-platform-api:
+      target: ${IDP_API_URL}
+      headers:
+        Authorization: Bearer ${IDP_API_TOKEN}
 
 techdocs:
   builder: local

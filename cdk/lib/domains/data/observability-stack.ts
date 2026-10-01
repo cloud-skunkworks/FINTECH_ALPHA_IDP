@@ -10,13 +10,19 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as amp from 'aws-cdk-lib/aws-aps';
 import { Construct } from 'constructs';
+import { irsaTrustCondition } from '../../constructs/irsa-role';
 
 export interface ObservabilityStackProps extends cdk.StackProps {
   environment: string;
   vpc: ec2.Vpc;
   eksClusterName: string;
+  /** OIDC provider ARN of the EKS cluster (ComputeStack.cluster.openIdConnectProvider). */
+  oidcProviderArn: string;
+  /** Platform API ALB, used for dashboard metrics. */
+  apiLoadBalancer: elbv2.IApplicationLoadBalancer;
 }
 
 export class ObservabilityStack extends cdk.Stack {
@@ -26,7 +32,7 @@ export class ObservabilityStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
 
-    const { environment, eksClusterName } = props;
+    const { environment, eksClusterName, oidcProviderArn, apiLoadBalancer } = props;
     const isProd = environment === 'prod';
 
     this.ampWorkspace = new amp.CfnWorkspace(this, 'AmpWorkspace', {
@@ -40,26 +46,18 @@ export class ObservabilityStack extends cdk.Stack {
 
     // The OTel Collector runs as a DaemonSet in the 'monitoring' namespace and uses
     // this IRSA role to remote-write metrics to AMP and ship logs to CloudWatch.
-    // cdk.Fn.importValue reads the OIDC provider ARN exported by ComputeStack.
-    //
-    // Why Fn.split here: IAM trust conditions require the issuer URL *without* 'https://'.
-    // Since the OIDC ARN is a CloudFormation token (not a plain string at synth time),
-    // we use Fn.select(1, Fn.split('https://', ...)) to strip the protocol prefix.
-    const oidcProviderArn = cdk.Fn.importValue(`IdpEksOidcProviderArn-${environment}`);
-    const oidcIssuer = cdk.Fn.select(
-      1,
-      cdk.Fn.split('https://', cdk.Fn.importValue(`IdpEksOidcProviderArn-${environment}`)),
-    );
+    // IAM trust conditions need the OIDC issuer *without* 'https://'. The provider ARN has the form
+    //   arn:aws:iam::<acct>:oidc-provider/<issuer-host-and-path>
+    // so everything after 'oidc-provider/' is exactly the issuer. (The previous code split an ARN on
+    // 'https://', which has no match and fails at deploy time.)
+    const oidcIssuer = cdk.Fn.select(1, cdk.Fn.split('oidc-provider/', oidcProviderArn));
 
     this.otelCollectorRole = new iam.Role(this, 'OtelCollectorRole', {
       roleName: `idp-otel-collector-${environment}`,
       assumedBy: new iam.FederatedPrincipal(
         oidcProviderArn,
         {
-          StringEquals: {
-            [`${oidcIssuer}:sub`]: 'system:serviceaccount:monitoring:otel-collector',
-            [`${oidcIssuer}:aud`]: 'sts.amazonaws.com',
-          },
+          StringEquals: irsaTrustCondition(this, 'OtelTrustCondition', oidcIssuer, 'monitoring', 'otel-collector'),
         },
         'sts:AssumeRoleWithWebIdentity',
       ),
@@ -99,7 +97,7 @@ export class ObservabilityStack extends cdk.Stack {
         'xray:GetSamplingTargets',
         'xray:GetSamplingStatisticSummaries',
       ],
-      resources: ['*'],
+      resources: ['*'], // X-Ray sampling/trace APIs do not support resource-level permissions
     }));
 
     const logRetention = isProd ? logs.RetentionDays.ONE_YEAR : logs.RetentionDays.ONE_MONTH;
@@ -165,41 +163,19 @@ export class ObservabilityStack extends cdk.Stack {
       new cloudwatch.GraphWidget({
         title: 'Platform API — Request Rate',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/ApplicationELB',
-            metricName: 'RequestCount',
-            dimensionsMap: { LoadBalancer: `app/idp-platform-${environment}` },
-            period: cdk.Duration.minutes(5),
-            statistic: 'Sum',
-          }),
-        ],
+        left: [apiLoadBalancer.metrics.requestCount({ period: cdk.Duration.minutes(5), statistic: 'Sum' })],
       }),
       new cloudwatch.GraphWidget({
-        title: 'Platform API — Error Rate',
+        title: 'Platform API — Target 5xx',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/ApplicationELB',
-            metricName: 'HTTPCode_Target_5XX_Count',
-            dimensionsMap: { LoadBalancer: `app/idp-platform-${environment}` },
-            period: cdk.Duration.minutes(5),
-            statistic: 'Sum',
-          }),
-        ],
+        left: [apiLoadBalancer.metrics.httpCodeTarget(elbv2.HttpCodeTarget.TARGET_5XX_COUNT, {
+          period: cdk.Duration.minutes(5), statistic: 'Sum',
+        })],
       }),
       new cloudwatch.GraphWidget({
         title: 'Platform API — p99 Latency',
         width: 8,
-        left: [
-          new cloudwatch.Metric({
-            namespace: 'AWS/ApplicationELB',
-            metricName: 'TargetResponseTime',
-            dimensionsMap: { LoadBalancer: `app/idp-platform-${environment}` },
-            period: cdk.Duration.minutes(5),
-            statistic: 'p99',
-          }),
-        ],
+        left: [apiLoadBalancer.metrics.targetResponseTime({ period: cdk.Duration.minutes(5), statistic: 'p99' })],
       }),
     );
 

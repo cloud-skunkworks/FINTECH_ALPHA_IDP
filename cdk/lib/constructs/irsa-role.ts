@@ -29,6 +29,25 @@ export interface IrsaRoleProps {
   roleName?: string;
 }
 
+/**
+ * Builds the StringEquals condition for an IRSA trust policy. The issuer is a deploy-time token,
+ * and tokens cannot be used as object keys, so the condition is wrapped in CfnJson.
+ */
+export function irsaTrustCondition(
+  scope: Construct,
+  id: string,
+  oidcIssuer: string,
+  namespace: string,
+  serviceAccountName: string,
+): cdk.CfnJson {
+  return new cdk.CfnJson(scope, id, {
+    value: {
+      [`${oidcIssuer}:sub`]: `system:serviceaccount:${namespace}:${serviceAccountName}`,
+      [`${oidcIssuer}:aud`]: 'sts.amazonaws.com',
+    },
+  });
+}
+
 export class IrsaRole extends Construct {
   public readonly role: iam.Role;
   public readonly roleArn: string;
@@ -65,10 +84,7 @@ export class IrsaRole extends Construct {
         oidcProviderArn,
         {
           // Bind to the exact namespace + ServiceAccount — wildcards are blocked by OPA policy.
-          StringEquals: {
-            [`${oidcIssuer}:sub`]: `system:serviceaccount:${namespace}:${serviceAccountName}`,
-            [`${oidcIssuer}:aud`]: 'sts.amazonaws.com',
-          },
+          StringEquals: irsaTrustCondition(this, 'TrustCondition', oidcIssuer, namespace, serviceAccountName),
         },
         'sts:AssumeRoleWithWebIdentity',
       ),

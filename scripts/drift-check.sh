@@ -8,16 +8,23 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ENV=""
 SMOKE_TEST=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --env) ENV="$2"; shift 2 ;;
+    --env) [[ $# -ge 2 ]] || { echo "--env requires a value"; exit 1; }; ENV="$2"; shift 2 ;;
     --smoke-test) SMOKE_TEST=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
+
+if [[ "$ENV" != "dev" && "$ENV" != "uat" && "$ENV" != "prod" && "$ENV" != "all" ]]; then
+  echo "Usage: $0 --env <dev|uat|prod|all> [--smoke-test]"
+  exit 1
+fi
 
 log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 
@@ -25,9 +32,7 @@ check_env() {
   local env="$1"
   log "Checking drift for environment: $env"
 
-  cd cdk
-  DIFF_OUTPUT=$(cdk diff "*-${env}" -c env="${env}" 2>&1 || true)
-  cd ..
+  DIFF_OUTPUT=$(cd "${REPO_ROOT}/cdk" && cdk diff "*-${env}" -c env="${env}" 2>&1 || true)
 
   if echo "$DIFF_OUTPUT" | grep -qE "^\["; then
     log "DRIFT DETECTED in $env:"
@@ -41,42 +46,27 @@ check_env() {
 
 smoke_test() {
   local env="$1"
-  local api_url="https://api.idp.${env}.internal.example.com"
-
-  if [[ "$env" == "prod" ]]; then
-    api_url="https://api.idp.internal.example.com"
-  fi
-
-  log "Running smoke tests against $env ($api_url)..."
-
-  # Liveness
-  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    --max-time 10 \
-    "${api_url}/healthz" || echo "000")
-
-  if [[ "$HTTP_STATUS" == "200" ]]; then
-    log "Liveness check PASSED ($HTTP_STATUS)"
-  else
-    log "Liveness check FAILED ($HTTP_STATUS)"
-    return 1
-  fi
-
-  log "Smoke tests PASSED for $env"
+  "${SCRIPT_DIR}/smoke-test.sh" --env "$env"
 }
 
 # Main
 if [[ "$ENV" == "all" ]]; then
-  FAILED=false
-  for env in dev uat prod; do
-    check_env "$env" || FAILED=true
-  done
-  $FAILED && exit 1
+  ENVS=(dev uat prod)
 else
-  check_env "$ENV"
+  ENVS=("$ENV")
 fi
 
-if [[ "$SMOKE_TEST" == "true" ]]; then
-  smoke_test "$ENV"
+FAILED=false
+for env in "${ENVS[@]}"; do
+  check_env "$env" || FAILED=true
+  if [[ "$SMOKE_TEST" == "true" ]]; then
+    smoke_test "$env" || FAILED=true
+  fi
+done
+
+if [[ "$FAILED" == "true" ]]; then
+  log "Drift check FAILED"
+  exit 1
 fi
 
 log "Drift check complete"

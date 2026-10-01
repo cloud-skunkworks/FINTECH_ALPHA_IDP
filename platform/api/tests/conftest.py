@@ -66,3 +66,133 @@ def auth_headers():
     In tests, the auth middleware is bypassed via dependency override.
     """
     return {"Authorization": "Bearer mock-test-token"}
+
+
+# ── Shared API test fixtures ───────────────────────────────────────────────
+# The OTel SDK would otherwise try to export spans to a local collector.
+os.environ.setdefault("OTEL_SDK_DISABLED", "true")
+
+from datetime import datetime, timezone  # noqa: E402
+
+from ..auth.cognito import TokenPayload, get_token_payload  # noqa: E402
+from ..main import app  # noqa: E402
+from ..services.aws_client import AWSClientFactory  # noqa: E402
+
+ALL_SCOPES = {"idp:provision", "idp:read", "idp:destroy"}
+
+
+ORIGINAL_HEALTH_CHECK = AWSClientFactory.health_check
+
+
+class MockAWSClientFactory(AWSClientFactory):
+    """In-memory AWSClientFactory — no network, records calls."""
+
+    def __init__(self):
+        self.jobs: dict[str, dict] = {}
+        self.account_id = "123456789012"
+        self.codebuild_runs: list[tuple[str, dict]] = []
+        self.fail_put_job = False
+        self.fail_ecr = False
+        self.fail_account = False
+        self.fail_codebuild = False
+
+    async def health_check(self):
+        return True
+
+    async def get_account_id(self):
+        if self.fail_account:
+            raise RuntimeError("sts down")
+        return self.account_id
+
+    async def put_job(self, job_id, **kwargs):
+        if self.fail_put_job:
+            raise RuntimeError("ddb down")
+        now = datetime.now(timezone.utc).isoformat()
+        self.jobs[job_id] = {
+            "job_id": job_id,
+            "status": "PENDING",
+            "resources_created": [],
+            "outputs": {},
+            "error_message": None,
+            "created_at": now,
+            "updated_at": now,
+            "completed_at": None,
+            **kwargs,
+        }
+
+    async def get_job(self, job_id):
+        return self.jobs.get(job_id)
+
+    async def update_job_status(self, job_id, status, error_message=None, **kwargs):
+        if job_id in self.jobs:
+            self.jobs[job_id]["status"] = status
+            self.jobs[job_id]["error_message"] = error_message
+
+    async def ensure_ecr_repository(self, name, **kwargs):
+        if self.fail_ecr:
+            raise RuntimeError("ecr down")
+        return f"{self.account_id}.dkr.ecr.ca-central-1.amazonaws.com/{name}"
+
+    async def start_codebuild_run(self, project_name, environment_variables):
+        if self.fail_codebuild:
+            raise RuntimeError("codebuild down")
+        self.codebuild_runs.append((project_name, environment_variables))
+        return f"{project_name}:build-123"
+
+
+def make_token(scopes=ALL_SCOPES) -> TokenPayload:
+    return TokenPayload(
+        sub="test-user@example.com",
+        scope=" ".join(sorted(scopes)),
+        client_id="test-client-id",
+        token_use="access",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_aws_on_startup(monkeypatch):
+    """The app lifespan builds its own AWSClientFactory; keep it offline."""
+
+    async def _ok(self):
+        return True
+
+    monkeypatch.setattr(AWSClientFactory, "health_check", _ok)
+
+
+@pytest.fixture
+def mock_aws_factory():
+    return MockAWSClientFactory()
+
+
+@pytest.fixture
+def make_client(mock_aws_factory):
+    """
+    Factory: make_client(scopes) -> TestClient authenticated with those scopes.
+
+    Overrides get_token_payload (so require_scope still runs and enforces 403)
+    and the AWSClientFactory dependency. make_client(None) leaves auth
+    un-overridden so the real 401 path is exercised.
+    """
+    clients: list[TestClient] = []
+
+    def _make(scopes=ALL_SCOPES):
+        app.dependency_overrides.clear()
+        app.dependency_overrides[AWSClientFactory] = lambda: mock_aws_factory
+        if scopes is not None:
+            token = make_token(scopes)
+            app.dependency_overrides[get_token_payload] = lambda: token
+        c = TestClient(app, base_url="http://localhost")
+        c.__enter__()
+        clients.append(c)
+        return c
+
+    yield _make
+    for c in clients:
+        c.__exit__(None, None, None)
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(make_client):
+    """Client with all scopes."""
+    return make_client(ALL_SCOPES)

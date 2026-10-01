@@ -11,7 +11,6 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-import boto3
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,7 +48,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Warm up AWS client connections
     aws_factory = AWSClientFactory()
-    await aws_factory.health_check()
+    if not await aws_factory.health_check():
+        log.warning("idp_api.aws_unreachable")  # /readyz will report 503
 
     log.info("idp_api.ready")
     yield
@@ -71,11 +71,11 @@ def create_app() -> FastAPI:
             "in ≤ 15 minutes without writing CDK or raising a ticket."
         ),
         version=os.environ.get("APP_VERSION", "1.0.0"),
+        # Security: docs and OpenAPI schema are disabled in production
         docs_url="/docs" if os.environ.get("ENVIRONMENT", "dev") != "prod" else None,
         redoc_url="/redoc" if os.environ.get("ENVIRONMENT", "dev") != "prod" else None,
         openapi_url="/openapi.json" if os.environ.get("ENVIRONMENT", "dev") != "prod" else None,
         lifespan=lifespan,
-        # Security: disable OpenAPI schema in production
     )
 
     # ── Security Middleware ────────────────────────────────────────────────

@@ -5,12 +5,11 @@ Validates Bearer tokens issued by the Cognito User Pool.
 Enforces OAuth 2.0 scopes: idp:provision, idp:read, idp:destroy.
 """
 
+import asyncio
 import os
-import time
 from functools import lru_cache
 from typing import Annotated
 
-import boto3
 import jwt
 import structlog
 from fastapi import Depends, HTTPException, status
@@ -71,24 +70,32 @@ async def get_token_payload(
     """
     Validate a Cognito JWT and return the decoded payload.
 
-    Raises HTTP 401 on invalid/expired token.
-    Raises HTTP 403 on missing scopes.
+    Raises HTTP 401 on invalid/expired token. Scope enforcement (HTTP 403)
+    happens in require_scope(), not here.
+
+    Cognito *access* tokens (the only tokens that carry `scope`) have no `aud`
+    claim; the app client is identified by `client_id` instead, so audience
+    verification is disabled and `client_id` / `token_use` are checked explicitly.
     """
     settings = get_settings()
     token = credentials.credentials
 
     try:
         jwks_client = get_jwks_client()
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        # PyJWKClient does blocking network I/O; keep it off the event loop.
+        signing_key = await asyncio.to_thread(jwks_client.get_signing_key_from_jwt, token)
 
         payload = jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=settings.client_id,
             issuer=settings.issuer,
-            options={"verify_exp": True},
+            options={"verify_exp": True, "verify_aud": False},
         )
+        if payload.get("token_use") != "access":
+            raise jwt.InvalidTokenError("token_use must be 'access'")
+        if payload.get("client_id") != settings.client_id:
+            raise jwt.InvalidTokenError("client_id mismatch")
     except jwt.ExpiredSignatureError:
         log.warning("auth.token_expired")
         raise HTTPException(
@@ -96,7 +103,7 @@ async def get_token_payload(
             detail="Token has expired",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except jwt.InvalidTokenError as e:
+    except jwt.PyJWTError as e:  # incl. InvalidTokenError and PyJWKClientError
         log.warning("auth.invalid_token", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

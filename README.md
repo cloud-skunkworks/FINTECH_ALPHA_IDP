@@ -3,7 +3,7 @@
 > **Classification:** Internal Engineering — Confidential  
 > **Version:** 1.0  
 > **Regulatory Scope:** PCI-DSS v4.0 · SOC 2 Type II · PIPEDA  
-> **Stack:** AWS CDK · EKS 1.30 · GitHub Actions · FastAPI · Backstage · OpenTelemetry · Claude AI
+> **Stack:** AWS CDK · EKS 1.36 · GitHub Actions · FastAPI · Backstage · OpenTelemetry · Claude AI
 
 ---
 
@@ -142,7 +142,7 @@ Backstage calls POST /v1/provision (FastAPI + Cognito JWT)
 │              AWS CDK Infrastructure Layer                  │
 │                                                           │
 │  IdpNetworkStack     VPC, subnets, NAT, VPC endpoints    │
-│  IdpEksStack         EKS 1.30, node groups, OIDC         │
+│  IdpEksStack         EKS 1.36, node groups, OIDC         │
 │  IdpPlatformApiStack ECS Fargate, Cognito, CodeDeploy    │
 │  IdpBackstageStack   ECS Fargate, Aurora Postgres        │
 │  IdpObservabilityStack AMP, CloudWatch, Grafana          │
@@ -257,7 +257,7 @@ idp-platform/
 │   ├── lib/
 │   │   ├── stacks/
 │   │   │   ├── network-stack.ts  # VPC, subnets, NAT, VPC endpoints
-│   │   │   ├── eks-stack.ts      # EKS 1.30, node groups, add-ons, OIDC
+│   │   │   ├── eks-stack.ts      # EKS 1.36, node groups, add-ons, OIDC
 │   │   │   ├── platform-api-stack.ts  # ECS Fargate, Cognito, ALB, CodeDeploy
 │   │   │   ├── backstage-stack.ts     # ECS Fargate, Aurora Postgres
 │   │   │   └── observability-stack.ts # AMP, CloudWatch, IRSA for OTel

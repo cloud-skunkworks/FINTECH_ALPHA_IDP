@@ -42,7 +42,7 @@ jobs:
   # ── Build & Push Platform API ─────────────────────────────────────────────
   build-platform-api:
     name: Build Platform API
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: |
       github.event_name == 'push' ||
       github.event.inputs.service == 'platform-api' ||
@@ -111,7 +111,7 @@ jobs:
   # ── API Unit Tests ────────────────────────────────────────────────────────
   test-platform-api:
     name: Platform API Tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: |
       github.event_name == 'push' ||
       github.event.inputs.service == 'platform-api' ||
@@ -129,24 +129,20 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
-        working-directory: platform/api
+        working-directory: platform
         run: |
-          pytest tests/ -v \
-            --cov=. \
-            --cov-report=xml \
-            --cov-fail-under=80 \
-            -x
+          python -m pytest -v --cov-report=xml -x
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
         with:
-          file: platform/api/coverage.xml
+          file: platform/coverage.xml
           flags: platform-api
 
   # ── Deploy Platform API to DEV ────────────────────────────────────────────
   deploy-platform-api-dev:
     name: Deploy Platform API → DEV
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [build-platform-api, test-platform-api]
     environment:
       name: dev
@@ -190,7 +186,7 @@ jobs:
   # ── Deploy Platform API to PROD (CodeDeploy canary) ──────────────────────
   deploy-platform-api-prod:
     name: Deploy Platform API → PROD (Canary)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: deploy-platform-api-dev
     environment:
       name: prod

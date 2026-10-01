@@ -8,11 +8,12 @@ and posts a structured triage report to Slack.
 Security constraints:
 - READ-ONLY: cloudwatch:GetMetricData, logs:StartQuery, logs:GetQueryResults
 - CANNOT: modify infrastructure, restart services, or escalate permissions
-- All I/O logged to audit S3 bucket
+- NOTE: audit logging to S3 is NOT yet implemented in this agent (only iac-agent has it)
 """
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,15 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-client = anthropic.Anthropic()
+_client: anthropic.Anthropic | None = None
+
+
+def _get_client() -> anthropic.Anthropic:
+    """Lazy client so importing this module doesn't require ANTHROPIC_API_KEY."""
+    global _client
+    if _client is None:
+        _client = anthropic.Anthropic()
+    return _client
 
 SYSTEM_PROMPT = Path(__file__).parent / "prompts" / "triage_alert.md"
 MODEL = "claude-sonnet-4-6"
@@ -103,7 +112,7 @@ Return ONLY valid JSON:
 }}
 """
 
-    response = client.messages.create(
+    response = _get_client().messages.create(
         model=MODEL,
         max_tokens=1024,
         system=system_prompt,
@@ -111,7 +120,13 @@ Return ONLY valid JSON:
     )
 
     raw = response.content[0].text
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
+        if not match:
+            raise
+        data = json.loads(match.group(1))
 
     log.info(
         "ops_agent.triage.complete",
@@ -137,7 +152,7 @@ def _query_recent_errors(service: str, environment: str) -> list[dict]:
     logs = boto3.client("logs", region_name=_REGION)
     log_group = f"/idp/workloads/{environment}/{service}"
 
-    query = f"""
+    query = """
 fields @timestamp, @message, statusCode, requestId
 | filter @message like /ERROR/ or statusCode >= 500
 | sort @timestamp desc
@@ -154,6 +169,7 @@ fields @timestamp, @message, statusCode, requestId
         query_id = start_query["queryId"]
 
         # Poll for results (max 10s)
+        result: dict = {}
         for _ in range(10):
             time.sleep(1)
             result = logs.get_query_results(queryId=query_id)
@@ -205,6 +221,7 @@ def _get_metrics_snapshot(alarm_name: str, namespace: str) -> dict[str, Any]:
             return {}
         alarm = alarms["MetricAlarms"][0]
         return {
+            "namespace": namespace,
             "state": alarm.get("StateValue"),
             "state_reason": alarm.get("StateReason"),
             "threshold": alarm.get("Threshold"),

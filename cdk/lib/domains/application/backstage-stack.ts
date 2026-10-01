@@ -6,7 +6,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
-import * as ecs_patterns from 'aws-cdk-lib/aws-ecs-patterns';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -52,7 +51,7 @@ export class BackstageStack extends cdk.Stack {
     // DB security group — only allows inbound from the ECS task security group on port 5432.
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', {
       vpc,
-      description: 'Backstage Aurora Postgres — only accepts connections from the Backstage ECS task',
+      description: 'Backstage Aurora Postgres - only accepts connections from the Backstage ECS task',
       allowAllOutbound: false,
     });
 
@@ -60,17 +59,17 @@ export class BackstageStack extends cdk.Stack {
     // deletionProtection is enforced in prod to prevent accidental data loss.
     const dbCluster = new rds.DatabaseCluster(this, 'BackstageDb', {
       engine: rds.DatabaseClusterEngine.auroraPostgres({
-        version: rds.AuroraPostgresEngineVersion.VER_16_2,
+        version: rds.AuroraPostgresEngineVersion.VER_16_13,
       }),
       serverlessV2MinCapacity: 0.5,
       serverlessV2MaxCapacity: isProd ? 16 : 2,
       writer: rds.ClusterInstance.serverlessV2('writer'),
-      readers: isProd ? [rds.ClusterInstance.serverlessV2('reader')] : [],
+      readers: isProd ? [rds.ClusterInstance.serverlessV2('reader', { scaleWithWriter: true })] : [],
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       securityGroups: [dbSg],
       credentials: rds.Credentials.fromSecret(dbSecret),
-      databaseName: 'backstage',
+      defaultDatabaseName: 'backstage',
       storageEncrypted: true,
       deletionProtection: isProd,
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
@@ -92,7 +91,7 @@ export class BackstageStack extends cdk.Stack {
     const ecsCluster = new ecs.Cluster(this, 'BackstageCluster', {
       clusterName: `idp-backstage-${environment}`,
       vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     const taskRole = new iam.Role(this, 'TaskRole', {
@@ -157,7 +156,21 @@ export class BackstageStack extends cdk.Stack {
       vpc,
       description: 'Backstage ECS Task SG',
     });
-    dbSg.addIngressRule(taskSg, ec2.Port.tcp(5432), 'Backstage task → Aurora Postgres');
+    dbSg.addIngressRule(taskSg, ec2.Port.tcp(5432), 'Backstage task -> Aurora Postgres');
+
+    // Without a service the task definition would never run.
+    new ecs.FargateService(this, 'BackstageService', {
+      serviceName: `idp-backstage-${environment}`,
+      cluster: ecsCluster,
+      taskDefinition: taskDef,
+      desiredCount: isProd ? 2 : 1,
+      assignPublicIp: false,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [taskSg],
+      minHealthyPercent: 100,
+      maxHealthyPercent: 200,
+      circuitBreaker: { rollback: true },
+    });
 
     new cdk.CfnOutput(this, 'BackstageEcrUri', {
       value: this.ecrRepository.repositoryUri,
